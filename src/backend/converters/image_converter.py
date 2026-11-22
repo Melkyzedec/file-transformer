@@ -1,0 +1,247 @@
+import gzip
+import io
+import os
+from PIL import Image
+import resvg_py
+
+try:
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+except Exception:
+    pass
+
+try:
+    from PIL import ImageFile
+    import imagecodecs
+    import numpy as np
+
+    class JxlImageFile(ImageFile.ImageFile):
+        format = "JXL"
+        format_description = "JPEG XL image"
+
+        def _open(self):
+            data = self.fp.read()
+            arr = imagecodecs.jpegxl_decode(data)
+            if arr.dtype == np.uint16:
+                arr = (arr / 256).astype(np.uint8)
+            elif arr.dtype in (np.float32, np.float64):
+                arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+            img = Image.fromarray(arr)
+            self._size = img.size
+            self._mode = img.mode
+            self.im = img.im
+
+    def _accept_jxl(prefix):
+        return prefix.startswith(b'\xff\x0a') or prefix.startswith(b'\x00\x00\x00\x0cJXL \r\n\x87\n')
+
+    Image.register_open('JXL', JxlImageFile, _accept_jxl)
+    Image.register_extension('JXL', '.jxl')
+    Image.register_mime('JXL', 'image/jxl')
+except Exception:
+    pass
+
+
+class ImageConverter:
+    """
+    Handles conversion between various image formats:
+    PNG, JPG/JPEG/JFIF, WEBP, ICO, GIF, BMP, TIFF, HEIC/HEIF, JXL, SVG (input), etc.
+    Supports resizing and quality compression.
+    """
+
+    SUPPORTED_INPUTS = {
+        '.png', '.jpg', '.jpeg', '.jfif', '.jfi', '.jpe', '.jif',
+        '.webp', '.ico', '.gif', '.bmp', '.dib', '.svg', '.tif', '.tiff',
+        '.heic', '.heif', '.jxl'
+    }
+    SUPPORTED_OUTPUTS = {'png', 'jpg', 'jpeg', 'jfif', 'webp', 'ico', 'gif', 'bmp', 'jxl'}
+
+    # Extension de sortie -> format Pillow
+    PIL_FORMATS = {
+        'png': 'PNG',
+        'jpg': 'JPEG', 'jpeg': 'JPEG', 'jfif': 'JPEG', 'jfi': 'JPEG', 'jpe': 'JPEG',
+        'webp': 'WEBP',
+        'ico': 'ICO',
+        'gif': 'GIF',
+        'bmp': 'BMP', 'dib': 'BMP',
+        'tif': 'TIFF', 'tiff': 'TIFF',
+        'jxl': 'JXL',
+    }
+
+    # Formats de sortie sans canal alpha
+    JPEG_OUTPUTS = {'jpg', 'jpeg', 'jfif', 'jfi', 'jpe'}
+
+    # Formats de sortie acceptant un paramètre de qualité
+    LOSSY_OUTPUTS = JPEG_OUTPUTS | {'webp', 'jxl'}
+
+    @staticmethod
+    def convert(input_path: str, output_path: str, options: dict = None) -> str:
+        """
+        Converts image from input_path to output_path based on options.
+        Options may include:
+          - quality (int 1-100)
+          - width (int)
+          - height (int)
+          - keep_aspect_ratio (bool)
+          - source_format (str) : format réel détecté, prioritaire sur l'extension
+        Returns output_path on success.
+        """
+        if options is None:
+            options = {}
+
+        ext_out = os.path.splitext(output_path)[1].lower().replace('.', '')
+
+        if ImageConverter._is_svg_source(input_path, options):
+            return ImageConverter._convert_svg(input_path, output_path, options)
+
+        # Open image with Pillow or fallback
+        with ImageConverter._open_image(input_path, options) as img:
+            # Handle RGBA to RGB for formats that don't support alpha (like JPEG)
+            if ext_out in ImageConverter.JPEG_OUTPUTS and img.mode in ('RGBA', 'LA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                img = background
+            elif ext_out in ImageConverter.JPEG_OUTPUTS and img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            elif ext_out not in ImageConverter.JPEG_OUTPUTS and img.mode != 'RGBA' and img.mode != 'RGB':
+                img = img.convert('RGBA')
+
+            img = ImageConverter._resize_image(img, options)
+            ImageConverter._save(img, output_path, ext_out, options)
+
+        return output_path
+
+    @staticmethod
+    def _resize_image(img: Image.Image, options: dict) -> Image.Image:
+        width = options.get('width')
+        height = options.get('height')
+        keep_aspect = options.get('keep_aspect_ratio', True)
+
+        if width or height:
+            orig_w, orig_h = img.size
+            new_w = int(width) if width else orig_w
+            new_h = int(height) if height else orig_h
+
+            if keep_aspect:
+                if width and not height:
+                    new_h = max(1, int(orig_h * (new_w / orig_w)))
+                elif height and not width:
+                    new_w = max(1, int(orig_w * (new_h / orig_h)))
+                else:
+                    img = img.copy()
+                    img.thumbnail((new_w, new_h), Image.Resampling.LANCZOS)
+                    new_w, new_h = img.size
+
+            img = img.resize((max(1, new_w), max(1, new_h)), Image.Resampling.LANCZOS)
+        return img
+
+    @staticmethod
+    def _open_image(input_path: str, options: dict = None) -> Image.Image:
+        try:
+            return Image.open(input_path)
+        except Exception as e:
+            source_format = (options or {}).get('source_format')
+            ext = os.path.splitext(input_path)[1].lower()
+            if source_format == 'jxl' or ext == '.jxl':
+                try:
+                    import imagecodecs
+                    import numpy as np
+                    with open(input_path, 'rb') as f:
+                        data = f.read()
+                    arr = imagecodecs.jpegxl_decode(data)
+                    if arr.dtype == np.uint16:
+                        arr = (arr / 256).astype(np.uint8)
+                    elif arr.dtype in (np.float32, np.float64):
+                        arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8)
+                    return Image.fromarray(arr)
+                except Exception:
+                    pass
+            raise e
+
+    @staticmethod
+    def _is_svg_source(input_path: str, options: dict) -> bool:
+        """Le format détecté prime sur l'extension du fichier."""
+        source_format = (options or {}).get('source_format')
+        if source_format:
+            return str(source_format).lower() == 'svg'
+        return os.path.splitext(input_path)[1].lower() in ('.svg', '.svgz')
+
+    @staticmethod
+    def _read_svg_text(input_path: str) -> str:
+        """Lit un fichier SVG ou SVGZ compressé (y compris avec extension trompeuse)."""
+        with open(input_path, 'rb') as f:
+            raw = f.read()
+        if raw.startswith(b'\x1f\x8b'):
+            raw = gzip.decompress(raw)
+        for encoding in ('utf-8-sig', 'cp1252', 'latin-1'):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode('utf-8', errors='replace')
+
+    @staticmethod
+    def _save(img: Image.Image, output_path: str, ext_out: str, options: dict) -> None:
+        """Enregistre l'image dans le format demandé avec les bonnes options."""
+        if ext_out == 'jxl':
+            try:
+                import imagecodecs
+                import numpy as np
+                quality = int(options.get('quality', 90))
+                arr = np.array(img)
+                data = imagecodecs.jpegxl_encode(arr, level=quality)
+                with open(output_path, 'wb') as f:
+                    f.write(data)
+                return
+            except Exception:
+                pass
+
+        pil_format = ImageConverter.PIL_FORMATS.get(ext_out)
+        save_args = {}
+
+        if ext_out in ImageConverter.LOSSY_OUTPUTS:
+            save_args['quality'] = int(options.get('quality', 90))
+            if ext_out in ImageConverter.JPEG_OUTPUTS:
+                save_args['progressive'] = True
+
+        if ext_out == 'ico':
+            max_side = min(img.size)
+            sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= max(max_side, 16)]
+            img.save(output_path, format='ICO', sizes=sizes or [(16, 16)])
+        elif ext_out == 'png':
+            img.save(output_path, format='PNG', optimize=True)
+        elif pil_format:
+            img.save(output_path, format=pil_format, **save_args)
+        else:
+            img.save(output_path)
+
+    @staticmethod
+    def _convert_svg(input_path: str, output_path: str, options: dict) -> str:
+        """Converts SVG or SVGZ to raster image formats using resvg-py (MIT / Apache-2.0)."""
+        dpi = int(options.get('dpi', 150))
+        if dpi <= 0:
+            raise ValueError("Le DPI doit être strictement positif.")
+        zoom = dpi / 72
+
+        try:
+            svg_text = ImageConverter._read_svg_text(input_path)
+            png_bytes = resvg_py.svg_to_bytes(svg_string=svg_text, zoom=zoom)
+            with Image.open(io.BytesIO(png_bytes)) as img:
+                img = ImageConverter._resize_image(img, options)
+                return ImageConverter.convert_image_obj(img, output_path, options)
+        except Exception as e:
+            raise RuntimeError(f"Échec de conversion SVG : {e}") from e
+
+    @staticmethod
+    def convert_image_obj(img: Image.Image, output_path: str, options: dict) -> str:
+        ext_out = os.path.splitext(output_path)[1].lower().replace('.', '')
+        if ext_out in ImageConverter.JPEG_OUTPUTS and img.mode in ('RGBA', 'LA', 'P'):
+            background = Image.new('RGB', img.size, (255, 255, 255))
+            if img.mode == 'P':
+                img = img.convert('RGBA')
+            background.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+            img = background
+
+        ImageConverter._save(img, output_path, ext_out, options or {})
+        return output_path
