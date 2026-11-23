@@ -1,82 +1,93 @@
 @echo off
-setlocal EnableExtensions
-cd /d "%~dp0"
+setlocal EnableExtensions DisableDelayedExpansion
+cd /d "%~dp0" || exit /b 1
 
-rem ============================================================
-rem  File Transformer - lanceur
-rem
-rem  Double-cliquez sur ce fichier pour demarrer l'application.
-rem  Lancez-le avec l'argument "debug" pour garder la console
-rem  ouverte et voir les messages d'erreur de Python.
-rem ============================================================
+if not exist "main.py" goto :incomplete
+if not exist "requirements.txt" goto :incomplete
 
-set "DEBUG_MODE="
-if /i "%~1"=="debug" set "DEBUG_MODE=1"
+set "VENV_PYTHON=%CD%\.venv\Scripts\python.exe"
+if exist ".venv" goto :check_venv
 
-rem --- Recherche de Python (version console, pour les verifications) ---
-set "PY_CONSOLE="
-for %%C in (py.exe python.exe) do (
-    if not defined PY_CONSOLE (
-        where %%C >nul 2>&1 && set "PY_CONSOLE=%%C"
-    )
-)
+set "PYTHON_MANAGER_AUTOMATIC_INSTALL=false"
+set "BOOTSTRAP="
+set "BOOTSTRAP_ARGS="
+if exist ".runtime\python\python.exe" call :probe "%CD%\.runtime\python\python.exe"
+if not defined BOOTSTRAP call :probe_launcher
+if not defined BOOTSTRAP for /f "delims=" %%P in ('where.exe $PATH:python.exe 2^>nul') do if not defined BOOTSTRAP call :probe_path "%%P"
+if not defined BOOTSTRAP goto :missing_python
 
-if not defined PY_CONSOLE (
-    echo.
-    echo   [ERREUR] Python est introuvable sur cet ordinateur.
-    echo.
-    echo   Installez Python 3.10 ou plus recent depuis https://www.python.org/downloads/
-    echo   et cochez "Add Python to PATH" pendant l'installation.
-    echo.
-    pause
-    exit /b 1
-)
+echo [File Transformer] Creation de l'environnement Python local...
+"%BOOTSTRAP%" %BOOTSTRAP_ARGS% -m venv ".venv"
+if errorlevel 1 goto :venv_creation_failed
 
-rem --- Verification des dependances ---
-%PY_CONSOLE% -c "import webview, pypdfium2, xhtml2pdf, resvg_py" >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo   [ERREUR] Les dependances Python ne sont pas installees.
-    echo.
-    echo   Installation en cours...
-    echo.
-    %PY_CONSOLE% -m pip install -r "%~dp0requirements.txt"
-    if errorlevel 1 (
-        echo.
-        echo   [ERREUR] L'installation a echoue. Lancez manuellement :
-        echo       pip install -r requirements.txt
-        echo.
-        pause
-        exit /b 1
-    )
-)
+:check_venv
+if not exist "%VENV_PYTHON%" goto :broken_venv
+"%VENV_PYTHON%" -c "import sys; raise SystemExit(sys.version_info < (3, 10))" >nul 2>&1
+if errorlevel 1 goto :broken_venv
 
-if defined DEBUG_MODE goto :debug
+"%VENV_PYTHON%" -c "import webview, PIL, pypdfium2, xhtml2pdf, resvg_py, docx, markdown, reportlab, pillow_heif, imagecodecs, numpy" >nul 2>&1
+if not errorlevel 1 goto :launch
 
-rem --- Mode normal : pas de fenetre console ---
-set "PY_WINDOWED="
-for %%C in (pyw.exe pythonw.exe) do (
-    if not defined PY_WINDOWED (
-        where %%C >nul 2>&1 && set "PY_WINDOWED=%%C"
-    )
-)
+echo [File Transformer] Installation des dependances dans .venv...
+"%VENV_PYTHON%" -m pip install -r "requirements.txt"
+if errorlevel 1 goto :dependencies_failed
+"%VENV_PYTHON%" -c "import webview, PIL, pypdfium2, xhtml2pdf, resvg_py, docx, markdown, reportlab, pillow_heif, imagecodecs, numpy"
+if errorlevel 1 goto :dependencies_failed
 
-if not defined PY_WINDOWED (
-    rem Pas de pythonw disponible : on se rabat sur la version console.
-    start "File Transformer" /min %PY_CONSOLE% "%~dp0main.py"
-    exit /b 0
-)
+:launch
+if /i "%~1"=="debug" goto :debug
+if not exist ".venv\Scripts\pythonw.exe" goto :debug
+start "" "%CD%\.venv\Scripts\pythonw.exe" "%CD%\main.py"
+exit /b %errorlevel%
 
-start "" %PY_WINDOWED% "%~dp0main.py"
-exit /b 0
-
-rem --- Mode debug : console visible, erreurs Python affichees ---
 :debug
-echo Demarrage de File Transformer en mode debug...
-echo.
-%PY_CONSOLE% "%~dp0main.py"
+echo [File Transformer] Demarrage avec "%VENV_PYTHON%".
+"%VENV_PYTHON%" "%CD%\main.py"
 set "RC=%errorlevel%"
-echo.
-echo Application fermee (code de sortie : %RC%)
+echo [File Transformer] Application fermee, code %RC%.
 pause
 exit /b %RC%
+
+:probe_launcher
+where.exe $PATH:py.exe >nul 2>&1 || exit /b 1
+call :probe "py.exe" -3
+exit /b %errorlevel%
+
+:probe_path
+rem Ignorer l'alias du Microsoft Store quand aucun Python n'est installe.
+if /i "%~dp1"=="%LOCALAPPDATA%\Microsoft\WindowsApps\" exit /b 1
+call :probe "%~1"
+exit /b %errorlevel%
+
+:probe
+"%~1" %~2 -c "import sys; raise SystemExit(sys.version_info < (3, 10))" >nul 2>&1
+if errorlevel 1 exit /b 1
+set "BOOTSTRAP=%~1"
+set "BOOTSTRAP_ARGS=%~2"
+exit /b 0
+
+:incomplete
+echo [ERREUR] Dossier incomplet. Utilisez Extraire tout, puis ouvrez le dossier qui contient main.py et requirements.txt.
+goto :failed
+
+:missing_python
+echo [ERREUR] Python 3.10 ou plus recent est requis. Installez Python 3.14 x64 pour votre compte, puis relancez ce fichier.
+echo https://www.python.org/downloads/windows/
+goto :failed
+
+:broken_venv
+echo [ERREUR] Le dossier .venv ne contient pas un Python utilisable. Renommez .venv en .venv-ancienne puis relancez.
+goto :failed
+
+:venv_creation_failed
+echo [ERREUR] Impossible de creer .venv. Verifiez que le dossier extrait est accessible en ecriture.
+echo Si un dossier .venv incomplet a ete cree, renommez-le avant de reessayer.
+goto :failed
+
+:dependencies_failed
+echo [ERREUR] Installation ou chargement des dependances impossible. Verifiez le message affiche et la connexion Internet.
+goto :failed
+
+:failed
+pause
+exit /b 1
