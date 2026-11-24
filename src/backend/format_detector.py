@@ -257,7 +257,8 @@ def _zip_variant(path):
             names = zf.namelist()
             if 'mimetype' in names:
                 try:
-                    mime = zf.read('mimetype').decode('ascii', 'ignore').strip()
+                    with zf.open('mimetype') as mf:
+                        mime = mf.read(256).decode('ascii', 'ignore').strip()
                 except Exception:
                     mime = ''
                 if mime == 'application/epub+zip':

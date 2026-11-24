@@ -13,7 +13,7 @@ set "BOOTSTRAP="
 set "BOOTSTRAP_ARGS="
 if exist ".runtime\python\python.exe" call :probe "%CD%\.runtime\python\python.exe"
 if not defined BOOTSTRAP call :probe_launcher
-if not defined BOOTSTRAP for /f "delims=" %%P in ('where.exe $PATH:python.exe 2^>nul') do if not defined BOOTSTRAP call :probe_path "%%P"
+if not defined BOOTSTRAP for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" $PATH:python.exe 2^>nul') do if not defined BOOTSTRAP call :probe_path "%%P"
 if not defined BOOTSTRAP goto :missing_python
 
 echo [File Transformer] Creation de l'environnement Python local...
@@ -49,9 +49,9 @@ pause
 exit /b %RC%
 
 :probe_launcher
-where.exe $PATH:py.exe >nul 2>&1 || exit /b 1
-call :probe "py.exe" -3
-exit /b %errorlevel%
+for /f "delims=" %%P in ('"%SystemRoot%\System32\where.exe" $PATH:py.exe 2^>nul') do if not defined BOOTSTRAP call :probe "%%P" -3
+if defined BOOTSTRAP exit /b 0
+exit /b 1
 
 :probe_path
 rem Ignorer l'alias du Microsoft Store quand aucun Python n'est installe.

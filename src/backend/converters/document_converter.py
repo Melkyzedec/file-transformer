@@ -1,7 +1,9 @@
 import html
+from html.parser import HTMLParser
 import logging
 import os
 import re
+import zipfile
 
 import docx
 import markdown
@@ -12,11 +14,52 @@ from xhtml2pdf.default import DEFAULT_CSS
 logging.getLogger('xhtml2pdf').setLevel(logging.ERROR)
 
 
+class _HtmlTextExtractor(HTMLParser):
+    """Extrait le texte visible d'un document HTML en ignorant script/style/noscript."""
+
+    _SKIP_TAGS = {'script', 'style', 'noscript'}
+    _BLOCK_TAGS = {'p', 'div', 'br', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'blockquote'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._skip_depth = 0
+        self._parts = []
+
+    def handle_starttag(self, tag, attrs):
+        t = tag.lower()
+        if t in self._SKIP_TAGS:
+            self._skip_depth += 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append('\n')
+
+    def handle_endtag(self, tag):
+        t = tag.lower()
+        if t in self._SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
+            self._parts.append('\n')
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = ''.join(self._parts)
+        lines = [line.strip() for line in raw.splitlines()]
+        return '\n'.join(line for line in lines if line)
+
+
 class DocumentConverter:
     """
     Handles conversion between document formats:
     PDF, DOCX, Markdown (.md), HTML, TXT, and PDF -> Images.
     """
+
+    MIN_DPI = 1
+    MAX_DPI = 600
+    MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
+    MAX_DOCX_ENTRIES = 2000
+    MAX_DOCX_COMPRESSION_RATIO = 100
 
     SUPPORTED_INPUTS = {'.pdf', '.docx', '.md', '.markdown', '.mdown', '.html', '.htm',
                         '.xhtml', '.txt', '.text', '.log'}
@@ -118,9 +161,12 @@ class DocumentConverter:
                 raise ValueError("Le document PDF ne contient aucune page.")
 
             if ext_out in ('png', 'jpg', 'jpeg'):
-                dpi = int(options.get('dpi', 150))
-                if dpi <= 0:
-                    raise ValueError("Le DPI doit être strictement positif.")
+                raw_dpi = options.get('dpi', 150)
+                if isinstance(raw_dpi, bool):
+                    raise ValueError(f"Le DPI doit être compris entre {DocumentConverter.MIN_DPI} et {DocumentConverter.MAX_DPI}.")
+                dpi = int(raw_dpi)
+                if dpi < DocumentConverter.MIN_DPI or dpi > DocumentConverter.MAX_DPI:
+                    raise ValueError(f"Le DPI doit être compris entre {DocumentConverter.MIN_DPI} et {DocumentConverter.MAX_DPI}.")
                 scale = dpi / 72
                 quality = int(options.get('quality', 90))
 
@@ -188,30 +234,65 @@ class DocumentConverter:
             doc.close()
 
     @staticmethod
+    def _validate_docx_archive(input_path: str) -> None:
+        """Contrôle anti-bombe ZIP avant ouverture par python-docx."""
+        try:
+            with zipfile.ZipFile(input_path, 'r') as zf:
+                infos = zf.infolist()
+                if len(infos) > DocumentConverter.MAX_DOCX_ENTRIES:
+                    raise ValueError("Archive DOCX trop complexe (trop d'entrées).")
+                total_uncompressed = 0
+                for info in infos:
+                    normalized = info.filename.replace('\\', '/')
+                    if normalized.startswith('/') or '..' in normalized.split('/'):
+                        raise ValueError("Archive DOCX invalide (chemin interdit).")
+                    total_uncompressed += info.file_size
+                    if total_uncompressed > DocumentConverter.MAX_DOCX_UNCOMPRESSED_BYTES:
+                        raise ValueError("Archive DOCX trop volumineuse après décompression (plafond 50 Mo dépassé).")
+                    if info.file_size > 1024 * 1024 and info.compress_size > 0:
+                        if (info.file_size / info.compress_size) > DocumentConverter.MAX_DOCX_COMPRESSION_RATIO:
+                            raise ValueError("Ratio de compression suspect détecté dans l'archive DOCX.")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Fichier DOCX corrompu ou archive ZIP invalide.") from exc
+
+    @staticmethod
     def _convert_docx(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
+        DocumentConverter._validate_docx_archive(input_path)
         doc = docx.Document(input_path)
         paragraphs = [p.text for p in doc.paragraphs]
+        tables = [
+            [[cell.text.strip() for cell in row.cells] for row in table.rows]
+            for table in doc.tables
+        ]
 
         if ext_out in ('txt', 'md'):
+            blocks = [p for p in paragraphs if p.strip()]
+            for table_rows in tables:
+                row_lines = [' | '.join(cells) for cells in table_rows if any(cells)]
+                if row_lines:
+                    blocks.append('\n'.join(row_lines))
             with open(output_path, 'w', encoding='utf-8') as f:
-                f.write('\n\n'.join(paragraphs))
+                f.write('\n\n'.join(blocks))
             return output_path
-        elif ext_out == 'html':
-            html_paragraphs = [f"<p>{html.escape(p)}</p>" for p in paragraphs if p.strip()]
-            html_content = (
-                "<!DOCTYPE html><html><head><meta charset='utf-8'></head>"
-                f"<body>{''.join(html_paragraphs)}</body></html>"
-            )
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(html_content)
-            return output_path
-        elif ext_out == 'pdf':
-            html_paragraphs = [f"<p>{html.escape(p)}</p>" for p in paragraphs if p.strip()]
-            body_html = ''.join(html_paragraphs) or '<p>&nbsp;</p>'
+        elif ext_out in ('html', 'pdf'):
+            body_parts = [f"<p>{html.escape(p)}</p>" for p in paragraphs if p.strip()]
+            for table_rows in tables:
+                if not table_rows:
+                    continue
+                rows_html = []
+                for cells in table_rows:
+                    cells_html = ''.join(f"<td>{html.escape(c)}</td>" for c in cells)
+                    rows_html.append(f"<tr>{cells_html}</tr>")
+                body_parts.append(f"<table>{''.join(rows_html)}</table>")
+            body_html = ''.join(body_parts) or '<p>&nbsp;</p>'
             html_content = (
                 "<!DOCTYPE html><html><head><meta charset='utf-8'></head>"
                 f"<body>{body_html}</body></html>"
             )
+            if ext_out == 'html':
+                with open(output_path, 'w', encoding='utf-8') as f:
+                    f.write(html_content)
+                return output_path
             return DocumentConverter._html_string_to_pdf(html_content, output_path)
 
         raise ValueError(f"Conversion DOCX vers {ext_out} non supportée.")
@@ -256,7 +337,10 @@ th {{ background-color: #f2f2f2; }}
         html_content = DocumentConverter._read_text(input_path)
 
         if ext_out == 'txt':
-            text = re.sub('<[^<]+?>', '', html_content)
+            extractor = _HtmlTextExtractor()
+            extractor.feed(html_content)
+            extractor.close()
+            text = extractor.get_text()
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write(text)
             return output_path

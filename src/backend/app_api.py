@@ -13,8 +13,34 @@ class AppAPI:
     """
     API bridge exposed to the JavaScript frontend via pywebview.
     """
+    _WINDOWS_RESERVED_NAMES = frozenset({
+        'CON', 'PRN', 'AUX', 'NUL',
+        *(f'COM{i}' for i in range(1, 10)),
+        *(f'LPT{i}' for i in range(1, 10)),
+    })
+
     def __init__(self):
         self._window = None
+        self._allowed_open_paths = set()
+        self._allowed_open_dirs = set()
+
+    @classmethod
+    def _is_windows_reserved_path(cls, path_value) -> bool:
+        """Analyse purement syntaxique : rejette CON/NUL/PRN/AUX/COM1..9/LPT1..9 sans accès disque."""
+        if not isinstance(path_value, str) or not path_value.strip():
+            return False
+        normalized = path_value.replace('\\', '/')
+        for segment in normalized.split('/'):
+            part = segment.strip()
+            if not part or part in ('.', '..'):
+                continue
+            # Ignore un préfixe lecteur Windows (ex. "C:")
+            if len(part) == 2 and part[1] == ':' and part[0].isalpha():
+                continue
+            base = part.split('.', 1)[0].rstrip(' .').upper()
+            if base in cls._WINDOWS_RESERVED_NAMES:
+                return True
+        return False
 
     def set_window(self, window):
         self._window = window
@@ -25,8 +51,8 @@ class AppAPI:
             return []
 
         file_types = (
-            'Tous les fichiers supportés (*.png;*.jpg;*.jpeg;*.jfif;*.webp;*.svg;*.ico;*.gif;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.jxl;*.pdf;*.docx;*.md;*.html;*.txt)',
-            'Images (*.png;*.jpg;*.jpeg;*.jfif;*.webp;*.svg;*.ico;*.gif;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.jxl)',
+            'Tous les fichiers supportés (*.png;*.jpg;*.jpeg;*.jfif;*.webp;*.svg;*.svgz;*.ico;*.gif;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.jxl;*.pdf;*.docx;*.md;*.html;*.txt)',
+            'Images (*.png;*.jpg;*.jpeg;*.jfif;*.webp;*.svg;*.svgz;*.ico;*.gif;*.bmp;*.tif;*.tiff;*.heic;*.heif;*.jxl)',
             'Documents (*.pdf;*.docx;*.md;*.html;*.txt)',
             'Tous les fichiers (*.*)'
         )
@@ -49,14 +75,22 @@ class AppAPI:
         """
         file_info_list = []
         for path in paths or []:
-            if not path or not os.path.isfile(path):
+            if not isinstance(path, str) or not path.strip():
+                continue
+            if self._is_windows_reserved_path(path):
+                continue
+            if os.path.islink(path) or not os.path.isfile(path):
                 continue
             file_info_list.append(self._file_info(path))
         return file_info_list
 
     def detect_format(self, path):
         """Exposes content-based format detection to the frontend."""
-        if not path or not os.path.isfile(path):
+        if not isinstance(path, str) or not path.strip():
+            return None
+        if self._is_windows_reserved_path(path):
+            return None
+        if os.path.islink(path) or not os.path.isfile(path):
             return None
         return format_detector.detect(path)
 
@@ -88,6 +122,7 @@ class AppAPI:
             return None
         result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if result and len(result) > 0:
+            self._register_allowed_open_dir(result[0])
             return result[0]
         return None
 
@@ -99,7 +134,22 @@ class AppAPI:
         if options is None:
             options = {}
 
-        if not os.path.exists(input_path):
+        if not isinstance(input_path, str) or not input_path.strip():
+            return {'success': False, 'error': "Chemin d'entrée invalide."}
+
+        if self._is_windows_reserved_path(input_path):
+            return {'success': False, 'input_path': input_path, 'error': "Nom de périphérique Windows réservé interdit."}
+
+        if output_dir is not None:
+            if not isinstance(output_dir, str) or not output_dir.strip() or self._is_windows_reserved_path(output_dir):
+                return {'success': False, 'input_path': input_path, 'error': "Dossier de destination invalide."}
+            if os.path.islink(output_dir):
+                return {'success': False, 'input_path': input_path, 'error': "Les liens symboliques ne sont pas autorisés en destination."}
+
+        if os.path.islink(input_path):
+            return {'success': False, 'input_path': input_path, 'error': "Les liens symboliques ne sont pas autorisés en entrée."}
+
+        if not os.path.isfile(input_path):
             return {'success': False, 'error': f"Fichier introuvable : {input_path}"}
 
         detection = format_detector.detect(input_path)
@@ -121,7 +171,23 @@ class AppAPI:
                 'error': f"Format reconnu ({detection['label']}) mais non pris en charge en entrée."
             }
 
+        allowed_outputs = (
+            ImageConverter.SUPPORTED_OUTPUTS
+            if detection['category'] == 'image'
+            else DocumentConverter.SUPPORTED_OUTPUTS
+            if detection['category'] == 'document'
+            else frozenset()
+        )
+        if target_format not in allowed_outputs:
+            return {
+                'success': False,
+                'input_path': input_path,
+                'error': f"Format de sortie non autorisé : {target_format}"
+            }
+
         destination = Path(output_dir or os.path.dirname(input_path) or '.')
+        if not destination.is_dir():
+            return {'success': False, 'input_path': input_path, 'error': "Dossier de destination introuvable."}
 
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_stem = f"{base_name}_converted"
@@ -146,7 +212,11 @@ class AppAPI:
                 if not first_output.is_file():
                     raise OSError('La conversion n’a produit aucun fichier.')
                 staged_files = sorted(staging.iterdir())
-                final_output = self._publish_outputs(staged_files, destination, output_stem)[first_output]
+                published = self._publish_outputs(staged_files, destination, output_stem)
+                final_output = published[first_output]
+
+            for output_file in published.values():
+                self._register_allowed_open_path(output_file)
 
             duration = round(time.time() - start_time, 2)
 
@@ -205,19 +275,66 @@ class AppAPI:
             else:
                 return targets
 
+    @staticmethod
+    def _normalize_path_key(path_value):
+        return os.path.normcase(str(Path(path_value).resolve()))
+
+    def _register_allowed_open_dir(self, dir_path):
+        try:
+            self._allowed_open_dirs.add(self._normalize_path_key(dir_path))
+        except (OSError, ValueError):
+            pass
+
+    def _register_allowed_open_path(self, file_path):
+        try:
+            resolved = Path(file_path).resolve()
+            self._allowed_open_paths.add(os.path.normcase(str(resolved)))
+            self._allowed_open_dirs.add(os.path.normcase(str(resolved.parent)))
+        except (OSError, ValueError):
+            pass
+
+    def _is_allowed_open_path(self, resolved_path):
+        key = os.path.normcase(str(resolved_path))
+        return key in self._allowed_open_paths or key in self._allowed_open_dirs
+
+    @staticmethod
+    def _resolve_explorer_executable():
+        system_root = os.environ.get('SystemRoot') or r'C:\Windows'
+        explorer_exe = os.path.normpath(os.path.join(system_root, 'explorer.exe'))
+        if os.path.isfile(explorer_exe):
+            return explorer_exe
+        return None
+
     def open_folder(self, file_path):
-        """Opens File Explorer with the specified file selected."""
-        if not file_path:
+        """Opens Windows Explorer on an authorized session file or folder without shell."""
+        if not isinstance(file_path, str) or not file_path.strip():
             return False
         try:
-            if os.path.exists(file_path):
-                subprocess.run(f'explorer /select,"{os.path.abspath(file_path)}"', shell=True)
+            resolved = Path(file_path).resolve()
+        except (OSError, ValueError):
+            return False
+
+        if not self._is_allowed_open_path(resolved):
+            return False
+
+        explorer_exe = self._resolve_explorer_executable()
+        if not explorer_exe:
+            return False
+
+        key = os.path.normcase(str(resolved))
+        try:
+            if key in self._allowed_open_paths and resolved.is_file():
+                subprocess.Popen([explorer_exe, f"/select,{resolved}"], shell=False)
                 return True
-            elif os.path.exists(os.path.dirname(file_path)):
-                subprocess.run(f'explorer "{os.path.abspath(os.path.dirname(file_path))}"', shell=True)
+            if key in self._allowed_open_dirs and resolved.is_dir():
+                subprocess.Popen([explorer_exe, str(resolved)], shell=False)
                 return True
-        except Exception as e:
-            print(f"Error opening folder: {e}")
+            parent_key = os.path.normcase(str(resolved.parent))
+            if parent_key in self._allowed_open_dirs and resolved.parent.is_dir():
+                subprocess.Popen([explorer_exe, str(resolved.parent)], shell=False)
+                return True
+        except OSError:
+            return False
         return False
 
     def get_supported_formats(self):
