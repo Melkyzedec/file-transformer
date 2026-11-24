@@ -48,9 +48,15 @@ class ImageConverter:
     Supports resizing and quality compression.
     """
 
+    MAX_SVG_BYTES = 10 * 1024 * 1024
+    MIN_DPI = 1
+    MAX_DPI = 600
+    MIN_DIMENSION = 1
+    MAX_DIMENSION = 16384
+
     SUPPORTED_INPUTS = {
         '.png', '.jpg', '.jpeg', '.jfif', '.jfi', '.jpe', '.jif',
-        '.webp', '.ico', '.gif', '.bmp', '.dib', '.svg', '.tif', '.tiff',
+        '.webp', '.ico', '.gif', '.bmp', '.dib', '.svg', '.svgz', '.tif', '.tiff',
         '.heic', '.heif', '.jxl'
     }
     SUPPORTED_OUTPUTS = {'png', 'jpg', 'jpeg', 'jfif', 'webp', 'ico', 'gif', 'bmp', 'jxl'}
@@ -113,25 +119,44 @@ class ImageConverter:
         return output_path
 
     @staticmethod
+    def _parse_dimension(value, label: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"La {label} doit être un entier compris entre {ImageConverter.MIN_DIMENSION} et {ImageConverter.MAX_DIMENSION} pixels.")
+        try:
+            dim = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"La {label} est invalide.") from exc
+        if dim < ImageConverter.MIN_DIMENSION or dim > ImageConverter.MAX_DIMENSION:
+            raise ValueError(
+                f"La {label} doit être comprise entre {ImageConverter.MIN_DIMENSION} et {ImageConverter.MAX_DIMENSION} pixels."
+            )
+        return dim
+
+    @staticmethod
     def _resize_image(img: Image.Image, options: dict) -> Image.Image:
         width = options.get('width')
         height = options.get('height')
         keep_aspect = options.get('keep_aspect_ratio', True)
 
-        if width or height:
+        if width is not None or height is not None:
             orig_w, orig_h = img.size
-            new_w = int(width) if width else orig_w
-            new_h = int(height) if height else orig_h
+            new_w = ImageConverter._parse_dimension(width, "largeur") if width is not None else orig_w
+            new_h = ImageConverter._parse_dimension(height, "hauteur") if height is not None else orig_h
 
             if keep_aspect:
-                if width and not height:
+                if width is not None and height is None:
                     new_h = max(1, int(orig_h * (new_w / orig_w)))
-                elif height and not width:
+                elif height is not None and width is None:
                     new_w = max(1, int(orig_w * (new_h / orig_h)))
                 else:
                     img = img.copy()
                     img.thumbnail((new_w, new_h), Image.Resampling.LANCZOS)
                     new_w, new_h = img.size
+
+            if new_w > ImageConverter.MAX_DIMENSION or new_h > ImageConverter.MAX_DIMENSION:
+                raise ValueError(
+                    f"Les dimensions calculées dépassent le plafond de {ImageConverter.MAX_DIMENSION} pixels."
+                )
 
             img = img.resize((max(1, new_w), max(1, new_h)), Image.Resampling.LANCZOS)
         return img
@@ -169,11 +194,29 @@ class ImageConverter:
 
     @staticmethod
     def _read_svg_text(input_path: str) -> str:
-        """Lit un fichier SVG ou SVGZ compressé (y compris avec extension trompeuse)."""
+        """Lit un fichier SVG ou SVGZ compressé de manière bornée (anti-bombe gzip)."""
+        max_bytes = ImageConverter.MAX_SVG_BYTES
         with open(input_path, 'rb') as f:
-            raw = f.read()
-        if raw.startswith(b'\x1f\x8b'):
-            raw = gzip.decompress(raw)
+            magic = f.read(2)
+            f.seek(0)
+            if magic == b'\x1f\x8b':
+                chunks = []
+                total = 0
+                with gzip.GzipFile(fileobj=f, mode='rb') as gz:
+                    while True:
+                        chunk = gz.read(65536)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > max_bytes:
+                            raise ValueError("Fichier SVGZ trop volumineux après décompression (plafond 10 Mo dépassé).")
+                        chunks.append(chunk)
+                raw = b''.join(chunks)
+            else:
+                raw = f.read(max_bytes + 1)
+                if len(raw) > max_bytes:
+                    raise ValueError("Fichier SVG trop volumineux (plafond 10 Mo dépassé).")
+
         for encoding in ('utf-8-sig', 'cp1252', 'latin-1'):
             try:
                 return raw.decode(encoding)
@@ -219,9 +262,12 @@ class ImageConverter:
     @staticmethod
     def _convert_svg(input_path: str, output_path: str, options: dict) -> str:
         """Converts SVG or SVGZ to raster image formats using resvg-py (MIT / Apache-2.0)."""
-        dpi = int(options.get('dpi', 150))
-        if dpi <= 0:
-            raise ValueError("Le DPI doit être strictement positif.")
+        raw_dpi = options.get('dpi', 150)
+        if isinstance(raw_dpi, bool):
+            raise ValueError(f"Le DPI doit être compris entre {ImageConverter.MIN_DPI} et {ImageConverter.MAX_DPI}.")
+        dpi = int(raw_dpi)
+        if dpi < ImageConverter.MIN_DPI or dpi > ImageConverter.MAX_DPI:
+            raise ValueError(f"Le DPI doit être compris entre {ImageConverter.MIN_DPI} et {ImageConverter.MAX_DPI}.")
         zoom = dpi / 72
 
         try:

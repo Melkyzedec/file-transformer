@@ -285,18 +285,18 @@ function renderQueue() {
 
     itemEl.innerHTML = `
       <div class="file-info">
-        <span class="file-icon-badge ${item.category}" title="${escapeHtml(item.formatLabel)}">${escapeHtml(badge)}</span>
+        <span class="file-icon-badge ${escapeHtml(item.category)}" title="${escapeHtml(item.formatLabel)}">${escapeHtml(badge)}</span>
         <div class="file-details">
           <span class="file-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
           <span class="file-size">${formatBytes(item.size)} • ${escapeHtml(item.formatLabel)}${detectionNote(item)}</span>
         </div>
       </div>
       <div class="file-actions">
-        <select class="item-format-select" aria-label="Format de sortie pour ${escapeHtml(item.name)}" data-id="${item.id}" ${item.supported && !state.isConverting ? '' : 'disabled'}>
+        <select class="item-format-select" aria-label="Format de sortie pour ${escapeHtml(item.name)}" data-id="${escapeHtml(item.id)}" ${item.supported && !state.isConverting ? '' : 'disabled'}>
           ${optionsHtml}
         </select>
-        <span class="status-pill ${item.status}" title="${escapeHtml(item.error || '')}">${getStatusText(item.status)}</span>
-        <button class="btn-icon" data-remove-id="${item.id}" title="Retirer de la liste" aria-label="Retirer ${escapeHtml(item.name)} de la liste" ${state.isConverting ? 'disabled' : ''}>
+        <span class="status-pill ${escapeHtml(item.status)}" title="${escapeHtml(item.error || '')}">${getStatusText(item.status)}</span>
+        <button class="btn-icon" data-remove-id="${escapeHtml(item.id)}" title="Retirer de la liste" aria-label="Retirer ${escapeHtml(item.name)} de la liste" ${state.isConverting ? 'disabled' : ''}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
@@ -345,7 +345,7 @@ function getStatusText(status) {
     case 'success': return 'Succès';
     case 'error': return 'Erreur';
     case 'unsupported': return 'Non supporté';
-    default: return status;
+    default: return escapeHtml(status);
   }
 }
 
@@ -455,7 +455,7 @@ function renderHistory() {
           <span class="status-pill success">Terminé</span>
           <div>
             <strong>${escapeHtml(h.outputName)}</strong>
-            <div class="history-meta">Original: ${escapeHtml(h.name)} • Temps: ${h.duration}s</div>
+            <div class="history-meta">Original: ${escapeHtml(h.name)} • Temps: ${escapeHtml(h.duration)}s</div>
           </div>
         </div>
         <button class="btn btn-secondary btn-sm" data-open-path="${escapeHtml(h.outputPath)}">
@@ -487,11 +487,11 @@ function renderHistory() {
 }
 
 function formatBytes(bytes, decimals = 2) {
-  if (bytes === 0) return '0 Octets';
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) return '0 o';
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Octets', 'Ko', 'Mo', 'Go'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['o', 'Ko', 'Mo', 'Go', 'To'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
