@@ -521,16 +521,41 @@ class TestFT04FrontendCSP(unittest.TestCase):
         self.assertNotIn("https://", csp)
 
 
+def _parse_requirements_entries(req_text: str) -> list[str]:
+    """Assemble les entrées logiques d'un requirements.txt (continuations '\\')."""
+    entries: list[str] = []
+    parts: list[str] = []
+    for raw_line in req_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            if parts:
+                raise AssertionError("Ligne de continuation interrompue par une ligne vide ou un commentaire.")
+            continue
+        if stripped.endswith("\\"):
+            chunk = stripped[:-1].strip()
+            if not chunk:
+                raise AssertionError("Ligne de continuation vide dans requirements.txt.")
+            parts.append(chunk)
+        else:
+            parts.append(stripped)
+            entries.append(" ".join(parts))
+            parts.clear()
+    if parts:
+        raise AssertionError("Continuation '\\' non terminée en fin de requirements.txt.")
+    return entries
+
+
 class TestFT05SupplyChainRequirements(unittest.TestCase):
     """FT-05 : dépendances Python épinglées (==) sur les versions vérifiées."""
 
     def test_requirements_txt_strictly_pinned(self):
         req_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
-        lines = [line.strip() for line in req_text.splitlines() if line.strip() and not line.strip().startswith("#")]
-        self.assertGreaterEqual(len(lines), 11)
-        for line in lines:
-            self.assertNotIn(">=", line, msg=f"Dépendance non épinglée : {line}")
-            self.assertRegex(line, r"^[A-Za-z0-9_.-]+==[0-9]+(?:\.[0-9]+)*$", msg=f"Format non épinglé : {line}")
+        entries = _parse_requirements_entries(req_text)
+        self.assertGreaterEqual(len(entries), 11)
+        for entry in entries:
+            self.assertNotIn(">=", entry, msg=f"Dépendance non épinglée : {entry}")
+            spec = entry.split("--hash=", 1)[0].strip()
+            self.assertRegex(spec, r"^[A-Za-z0-9_.-]+==[0-9]+(?:\.[0-9]+)*$", msg=f"Format non épinglé : {entry}")
 
 
 class TestFT06HostileConversionsAndWindowsNames(unittest.TestCase):
@@ -656,6 +681,132 @@ class TestFT07BatchLauncherHardening(unittest.TestCase):
         self.assertNotRegex(stripped, r"(?i)\bwhere\.exe\b")
         # Aucun appel relatif "py.exe" dans call :probe
         self.assertNotIn('call :probe "py.exe"', bat_text)
+
+
+class ReleaseHardeningTests(unittest.TestCase):
+    """Durcissement de publication : hashes SHA-256, CI épinglée, SECURITY.md, Dependabot."""
+
+    DIRECT_PACKAGES = {
+        "pywebview",
+        "pillow",
+        "pypdfium2",
+        "xhtml2pdf",
+        "resvg-py",
+        "python-docx",
+        "markdown",
+        "reportlab",
+        "pillow-heif",
+        "imagecodecs",
+        "numpy",
+    }
+
+    @staticmethod
+    def _normalize_pkg(name: str) -> str:
+        return re.sub(r"[-_.]+", "-", name).lower()
+
+    def test_requirements_txt_pins_versions_hashes_and_no_duplicates(self):
+        req_text = (REPO_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        for line in req_text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            for forbidden in (">=", "<=", "~=", "!=", "git+", "--index-url", "--extra-index-url", "--find-links"):
+                self.assertNotIn(forbidden, stripped, msg=f"Spécification interdite dans requirements.txt : {stripped}")
+
+        entries = _parse_requirements_entries(req_text)
+        self.assertGreaterEqual(len(entries), len(self.DIRECT_PACKAGES))
+
+        seen_packages: set[str] = set()
+        for entry in entries:
+            tokens = entry.split()
+            self.assertGreaterEqual(len(tokens), 2, msg=f"Empreinte --hash=sha256 manquante : {entry}")
+            spec, hash_tokens = tokens[0], tokens[1:]
+            self.assertRegex(
+                spec,
+                r"^[A-Za-z0-9_.-]+==[0-9]+(?:\.[0-9]+)*$",
+                msg=f"Version non strictement épinglée : {spec}",
+            )
+            pkg_norm = self._normalize_pkg(spec.split("==", 1)[0])
+            self.assertNotIn(pkg_norm, seen_packages, msg=f"Dépendance dupliquée dans requirements.txt : {pkg_norm}")
+            seen_packages.add(pkg_norm)
+
+            seen_hashes: set[str] = set()
+            for token in hash_tokens:
+                self.assertRegex(
+                    token,
+                    r"^--hash=sha256:[0-9a-f]{64}$",
+                    msg=f"Jeton --hash=sha256 invalide pour {spec} : {token}",
+                )
+                self.assertNotIn(token, seen_hashes, msg=f"Empreinte dupliquée pour {spec} : {token}")
+                seen_hashes.add(token)
+
+        missing_direct = self.DIRECT_PACKAGES - seen_packages
+        self.assertEqual(missing_direct, set(), msg=f"Dépendances directes absentes : {sorted(missing_direct)}")
+
+    def test_ci_workflow_is_read_only_pins_actions_and_runs_all_checks(self):
+        workflow_path = REPO_ROOT / ".github" / "workflows" / "tests.yml"
+        self.assertTrue(workflow_path.is_file(), msg="Le workflow .github/workflows/tests.yml est manquant.")
+        content = workflow_path.read_text(encoding="utf-8")
+
+        self.assertRegex(content, r"(?m)^\s*push:\s*$")
+        self.assertRegex(content, r"(?m)^\s*pull_request:\s*$")
+        self.assertIn("main", content)
+        self.assertIn("runs-on: windows-latest", content)
+        self.assertRegex(content, r"python-version:\s*[\"']?3\.14[\"']?")
+        self.assertIn("actions/setup-node@", content)
+        self.assertRegex(content, r"permissions:\s*\r?\n\s+contents:\s*read\b")
+        self.assertNotRegex(content, r":\s*write\b")
+        self.assertIn("persist-credentials: false", content)
+
+        uses_refs = re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", content, flags=re.MULTILINE)
+        self.assertGreaterEqual(len(uses_refs), 3)
+        for ref in uses_refs:
+            self.assertRegex(
+                ref,
+                r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$",
+                msg=f"Action non épinglée sur un SHA complet de 40 hex : {ref}",
+            )
+
+        self.assertIn("--require-hashes", content)
+        self.assertIn("python -B -W default -m unittest discover -s tests -v", content)
+        self.assertIn("node tests/frontend-state.cjs", content)
+
+    def test_security_policy_uses_private_github_reporting_without_personal_email(self):
+        security_path = REPO_ROOT / "SECURITY.md"
+        self.assertTrue(security_path.is_file(), msg="Le fichier SECURITY.md est manquant.")
+        content = security_path.read_text(encoding="utf-8")
+        self.assertGreater(len(content.strip()), 50)
+
+        lowered = content.lower()
+        self.assertIn("advisories", lowered)
+        self.assertIn("report a vulnerability", lowered)
+        self.assertIn("github", lowered)
+        self.assertNotRegex(
+            content,
+            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+            msg="SECURITY.md ne doit contenir aucune adresse e-mail personnelle.",
+        )
+
+    def test_dependabot_covers_pip_and_github_actions_weekly(self):
+        dependabot_path = REPO_ROOT / ".github" / "dependabot.yml"
+        self.assertTrue(dependabot_path.is_file(), msg="Le fichier .github/dependabot.yml est manquant.")
+        content = dependabot_path.read_text(encoding="utf-8")
+        lines = [line for line in content.splitlines() if not line.lstrip().startswith("#")]
+        clean = "\n".join(lines)
+
+        self.assertRegex(clean, r"(?m)^version:\s*2\s*$")
+        self.assertRegex(clean, r"(?m)^updates:\s*$")
+
+        blocks = re.split(r"(?m)^\s*-\s+package-ecosystem:\s*", clean)[1:]
+        self.assertEqual(len(blocks), 2, msg="Dependabot doit déclarer exactement 2 écosystèmes (pip et github-actions).")
+        ecosystems: set[str] = set()
+        for block in blocks:
+            first_line = block.splitlines()[0].strip().strip("'\"")
+            ecosystems.add(first_line)
+            self.assertRegex(block, r"directory:\s*[\"']?/[\"']?", msg=f"directory '/' manquant pour {first_line}")
+            self.assertRegex(block, r"interval:\s*[\"']?weekly[\"']?", msg=f"interval 'weekly' manquant pour {first_line}")
+
+        self.assertEqual(ecosystems, {"pip", "github-actions"})
 
 
 if __name__ == "__main__":

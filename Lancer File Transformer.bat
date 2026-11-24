@@ -29,7 +29,7 @@ if errorlevel 1 goto :broken_venv
 if not errorlevel 1 goto :launch
 
 echo [File Transformer] Installation des dependances dans .venv...
-"%VENV_PYTHON%" -m pip install -r "requirements.txt"
+"%VENV_PYTHON%" -m pip install --require-hashes -r "requirements.txt"
 if errorlevel 1 goto :dependencies_failed
 "%VENV_PYTHON%" -c "import webview, PIL, pypdfium2, xhtml2pdf, resvg_py, docx, markdown, reportlab, pillow_heif, imagecodecs, numpy"
 if errorlevel 1 goto :dependencies_failed
