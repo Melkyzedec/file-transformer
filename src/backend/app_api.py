@@ -13,10 +13,12 @@ class AppAPI:
     """
     API bridge exposed to the JavaScript frontend via pywebview.
     """
+    # Liste de la documentation Windows (« Naming Files, Paths, and Namespaces ») :
+    # COM0/LPT0 et les chiffres en exposant ¹ ² ³ sont aussi des périphériques.
     _WINDOWS_RESERVED_NAMES = frozenset({
-        'CON', 'PRN', 'AUX', 'NUL',
-        *(f'COM{i}' for i in range(1, 10)),
-        *(f'LPT{i}' for i in range(1, 10)),
+        'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
+        *(f'COM{i}' for i in '0123456789¹²³'),
+        *(f'LPT{i}' for i in '0123456789¹²³'),
     })
 
     def __init__(self):
@@ -26,10 +28,14 @@ class AppAPI:
 
     @classmethod
     def _is_windows_reserved_path(cls, path_value) -> bool:
-        """Analyse purement syntaxique : rejette CON/NUL/PRN/AUX/COM1..9/LPT1..9 sans accès disque."""
+        """Analyse purement syntaxique, sans accès disque : noms de périphériques Windows et espace \\\\.\\."""
         if not isinstance(path_value, str) or not path_value.strip():
             return False
         normalized = path_value.replace('\\', '/')
+        # Espace de noms des périphériques Win32 (\\.\PhysicalDrive0, \\.\pipe\...).
+        # Le préfixe \\?\ des chemins longs reste permis.
+        if normalized.startswith('//./'):
+            return True
         for segment in normalized.split('/'):
             part = segment.strip()
             if not part or part in ('.', '..'):
@@ -37,7 +43,9 @@ class AppAPI:
             # Ignore un préfixe lecteur Windows (ex. "C:")
             if len(part) == 2 and part[1] == ':' and part[0].isalpha():
                 continue
-            base = part.split('.', 1)[0].rstrip(' .').upper()
+            # "NUL:" et "CON.txt:flux" : le nom précède un éventuel flux NTFS.
+            name = part.split(':', 1)[0]
+            base = name.split('.', 1)[0].rstrip(' .').upper()
             if base in cls._WINDOWS_RESERVED_NAMES:
                 return True
         return False
