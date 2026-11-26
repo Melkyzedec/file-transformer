@@ -34,6 +34,20 @@ class TestM3BombePdf(_TempCase):
         render.assert_not_called()
         self.assertIn("pixels", res["error"])
 
+    def test_tall_or_oversized_pages_rejected_before_rendering(self):
+        cases = {
+            "page haute et étroite": ((0, 0, 10, 14400), 150),   # 21 x 30 000 px
+            "page large et basse": ((0, 0, 14400, 10), 150),     # 30 000 x 21 px
+            "budget de pixels": ((0, 0, 14000, 14000), 72),      # 14 000 px de côté, 196 Mpx
+        }
+        for label, (media_box, dpi) in cases.items():
+            with self.subTest(label):
+                pdf = self._pdf(media_box=media_box)
+                with mock.patch.object(DocumentConverter, "_save_pdf_page_image") as render:
+                    res = self.convert(pdf, "png", dpi=dpi)
+                self.assertFalse(res["success"], msg=label)
+                render.assert_not_called()
+
     def test_too_many_pages_rejected_before_rendering(self):
         limit = getattr(DocumentConverter, "MAX_PDF_IMAGE_PAGES", 500)
         pdf = self._pdf(media_box=(0, 0, 10, 10), pages=limit + 1)

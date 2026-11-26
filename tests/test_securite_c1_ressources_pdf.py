@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from securite_outils import (  # noqa: E402
     GREEN,
+    REPO_ROOT,
     _save_solid_png,
     _solid_png_data_uri,
     _count_pdf_pixels,
@@ -70,6 +71,23 @@ class TestC1RessourcesExternesPdf(_TempCase):
                     _count_pdf_pixels(Path(res["output_path"]), GREEN), 0,
                     msg=f"Image locale incrustée dans le PDF ({label})",
                 )
+
+    def test_html_to_pdf_never_embeds_files_from_application_folder(self):
+        """Le lanceur .bat démarre dans le dossier de l'application : la fixture
+        du dépôt ne doit pas être lisible, en absolu comme en relatif."""
+        fixture = REPO_ROOT / "tests" / "fixtures" / "exemple.png"
+        purple = (167, 102, 178)  # un des quatre aplats de la fixture
+        previous_cwd = os.getcwd()
+        os.chdir(REPO_ROOT)
+        try:
+            res = self.convert(self._html_file(
+                f'<img src="{fixture}" width="48" height="48">'
+                '<img src="tests/fixtures/exemple.png" width="48" height="48">'
+            ), "pdf")
+        finally:
+            os.chdir(previous_cwd)
+        self.assertTrue(res["success"], msg=res.get("error"))
+        self.assertEqual(_count_pdf_pixels(Path(res["output_path"]), purple, tolerance=25), 0)
 
     def test_html_to_pdf_never_opens_network_connections(self):
         res = self.convert(self._html_file(

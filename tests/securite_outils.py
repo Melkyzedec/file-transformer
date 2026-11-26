@@ -14,6 +14,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import pypdfium2 as pdfium
 from PIL import Image
 
@@ -26,7 +27,7 @@ from app_api import AppAPI  # noqa: E402
 from converters.document_converter import DocumentConverter  # noqa: E402
 
 __all__ = [
-    "AppAPI", "DocumentConverter", "GREEN", "RED", "XSS_PAYLOAD",
+    "REPO_ROOT", "AppAPI", "DocumentConverter", "GREEN", "RED", "XSS_PAYLOAD",
     "_save_solid_png", "_solid_png_data_uri", "_count_pdf_pixels", "_minimal_pdf",
     "_active_html_findings", "_TempCase",
 ]
@@ -51,8 +52,8 @@ def _solid_png_data_uri(color, size=(40, 40)) -> str:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
-def _count_pdf_pixels(pdf_path: Path, color) -> int:
-    """Rend toutes les pages et compte les pixels proches de `color`."""
+def _count_pdf_pixels(pdf_path: Path, color, tolerance: int = 60) -> int:
+    """Rend toutes les pages et compte les pixels à moins de `tolerance` de `color`."""
     doc = pdfium.PdfDocument(str(pdf_path))
     total = 0
     try:
@@ -61,15 +62,13 @@ def _count_pdf_pixels(pdf_path: Path, color) -> int:
             try:
                 bitmap = page.render(scale=1)
                 try:
-                    img = bitmap.to_pil().convert("RGB")
+                    pixels = np.asarray(bitmap.to_pil().convert("RGB"), dtype=np.int16)
                 finally:
                     bitmap.close()
             finally:
                 page.close()
-            total += sum(
-                1 for px in img.getdata()
-                if all(abs(px[i] - color[i]) < 60 for i in range(3))
-            )
+            close = np.all(np.abs(pixels - np.array(color, dtype=np.int16)) < tolerance, axis=-1)
+            total += int(close.sum())
     finally:
         doc.close()
     return total
