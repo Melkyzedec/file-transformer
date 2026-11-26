@@ -137,6 +137,22 @@ class TestM5ImagesPixels(_PixelCase):
                 self.assertTrue(res["success"], msg=res.get("error"))
                 self.assertQuadrants(res["output_path"], tolerance=tolerance, size=(48, 48))
 
+    def test_heic_input_converts_back_to_png(self):
+        # Écrit avec l'API de pillow_heif, sans enregistrer de greffon Pillow :
+        # la lecture prouve que le convertisseur a bien enregistré le sien.
+        import pillow_heif
+
+        path = self.root / "CANARY_TEST_in.heic"
+        try:
+            with Image.open(FIXTURE) as fixture:
+                pillow_heif.from_pillow(fixture.convert("RGB")).save(str(path), quality=-1)  # sans perte
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.skipTest(f"Encodeur HEIF indisponible ici : {exc}")
+        self.assertEqual(self.api.detect_format(str(path))["format"], "heic")
+        res = self.convert(path, "png")
+        self.assertTrue(res["success"], msg=res.get("error"))
+        self.assertQuadrants(res["output_path"], tolerance=4, size=(48, 48))
+
     def test_svg_renders_its_shapes_and_honours_dpi(self):
         svg = self.root / "CANARY_TEST_quadrants.svg"
         rects = "".join(

@@ -134,6 +134,21 @@ class TestM7MessagesErreur(_TempCase):
         self.assertTrue(res["error"].strip())
         self.assertNoDirectoryLeak(res["error"])
 
+    def test_os_errors_quoting_full_paths_are_trimmed_to_file_names(self):
+        png = self.root / "CANARY_TEST_droits.png"
+        with Image.new("RGB", (4, 4)) as img:
+            img.save(png, format="PNG")
+        for error in (
+            PermissionError(13, "Permission denied", str(self.out_dir / "CANARY_TEST_droits_converted.webp")),
+            OSError(f"cannot identify image file {str(png)!r}"),
+        ):
+            with self.subTest(type(error).__name__):
+                with mock.patch.object(ImageConverter, "convert", side_effect=error):
+                    res = self.convert(png, "webp")
+                self.assertFalse(res["success"])
+                self.assertRegex(res["error"], r"CANARY_TEST_droits(_converted\.webp|\.png)")
+                self.assertNoDirectoryLeak(res["error"])
+
     def test_memory_and_silent_errors_get_a_clear_message(self):
         png = self.root / "CANARY_TEST_memoire.png"
         with Image.new("RGB", (4, 4)) as img:
@@ -176,6 +191,8 @@ class TestM8HtmlVersTexteMasque(_TempCase):
         for label, html_text in {
             "sans </head>": "<html><head><title>CANARY_TEST_TITRE</title><body><p>CANARY_TEST_CORPS</p></body></html>",
             "sans <body>": "<head><title>CANARY_TEST_TITRE</title><p>CANARY_TEST_CORPS</p>",
+            "sans <head>": "<title>CANARY_TEST_TITRE</title><p>CANARY_TEST_CORPS</p>",
+            "texte après </body>": "<head><title>CANARY_TEST_TITRE</title></body>CANARY_TEST_CORPS",
         }.items():
             with self.subTest(label):
                 text = self._txt(html_text)

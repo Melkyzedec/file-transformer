@@ -3,6 +3,7 @@
 Données exclusivement fictives (CANARY_TEST_ / @example.test).
 """
 
+import os
 import re
 import sys
 import unittest
@@ -33,12 +34,20 @@ class TestM7HtmlAvecSvgInline(_TempCase):
             "sans doctype": f"<html><head><title>CANARY_TEST</title></head><body>{INLINE_ICON}</body></html>",
             "icône en tête": f"<!doctype html>\n<html lang=\"fr\"><body>{INLINE_ICON}<p>CANARY_TEST</p></body></html>",
             "fragment": f"<div class=\"carte\">{INLINE_ICON}<p>CANARY_TEST</p></div>",
+            "long commentaire": "<!-- " + "CANARY_TEST " * 80 + "-->\n"
+                                f"<html><body>{INLINE_ICON}</body></html>",
         }
         for label, text in cases.items():
             with self.subTest(label):
                 info = format_detector.detect(str(self._write("CANARY_TEST_page.html", text)))
                 self.assertEqual((info["format"], info["category"], info["mismatch"]),
                                  ("html", "document", False))
+
+    def test_html_root_element_wins_over_a_misleading_extension(self):
+        # Le <html> arrive après 512 caractères de commentaire : seul l'élément racine le révèle.
+        text = "<!-- " + "CANARY_TEST " * 80 + "-->\n<html><body><p>CANARY_TEST</p></body></html>"
+        info = format_detector.detect(str(self._write("CANARY_TEST_page.txt", text)))
+        self.assertEqual((info["format"], info["mismatch"]), ("html", True))
 
     def test_html_with_inline_svg_converts_to_pdf(self):
         path = self._write("CANARY_TEST_page.html",
@@ -98,6 +107,15 @@ class TestM8EncodagesUnicode(_TempCase):
         html_text = Path(res["output_path"]).read_text(encoding="utf-8")
         self.assertIn("CANARY_TEST_TITRE é</h1>", html_text)
         self.assertIn("<strong>gras</strong>", html_text)
+
+    def test_line_endings_are_normalized(self):
+        path = self.root / "CANARY_TEST_fins.txt"
+        path.write_bytes(b"CANARY_TEST_A\r\nCANARY_TEST_B\rCANARY_TEST_C\n")
+        res = self.convert(path, "md")
+        self.assertTrue(res["success"], msg=res.get("error"))
+        with open(res["output_path"], encoding="utf-8", newline="") as f:
+            text = f.read().replace(os.linesep, "\n")
+        self.assertEqual(text, "CANARY_TEST_A\nCANARY_TEST_B\nCANARY_TEST_C\n")
 
     def test_legacy_and_plain_utf8_files_still_decode(self):
         cases = {
