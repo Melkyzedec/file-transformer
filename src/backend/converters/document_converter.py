@@ -158,17 +158,34 @@ class DocumentConverter:
 
         raise ValueError(f"Format d'entrée non supporté : {source_format or ext_in}")
 
+    # UTF-32 avant UTF-16 : le BOM UTF-32 LE commence par celui d'UTF-16 LE.
+    _UNICODE_BOMS = (
+        (b'\xff\xfe\x00\x00', 'utf-32-le'),
+        (b'\x00\x00\xfe\xff', 'utf-32-be'),
+        (b'\xef\xbb\xbf', 'utf-8'),
+        (b'\xff\xfe', 'utf-16-le'),
+        (b'\xfe\xff', 'utf-16-be'),
+    )
+
     @staticmethod
     def _read_text(input_path: str) -> str:
-        """Lit un fichier texte en tolérant les encodages hérités (cp1252, latin-1)."""
-        for encoding in ('utf-8-sig', 'cp1252', 'latin-1'):
-            try:
-                with open(input_path, 'r', encoding=encoding) as f:
-                    return f.read()
-            except UnicodeDecodeError:
-                continue
-        with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read()
+        """Lit un fichier texte : BOM Unicode (UTF-8/16/32), sinon UTF-8, cp1252, latin-1."""
+        with open(input_path, 'rb') as f:
+            raw = f.read()
+        text = None
+        for bom, encoding in DocumentConverter._UNICODE_BOMS:
+            if raw.startswith(bom):
+                text = raw[len(bom):].decode(encoding, errors='replace')
+                break
+        if text is None:
+            for encoding in ('utf-8', 'cp1252', 'latin-1'):
+                try:
+                    text = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        # Mêmes fins de ligne qu'une lecture en mode texte.
+        return text.replace('\r\n', '\n').replace('\r', '\n')
 
     @staticmethod
     def _save_pdf_page_image(page, dest_path: str, ext_out: str, scale: float, quality: int) -> None:
