@@ -11,6 +11,35 @@ try:
 except Exception:
     pass
 
+def _check_jxl_dimensions(data: bytes) -> None:
+    """Refuse un JPEG XL trop grand en lisant son en-tête, avant tout décodage.
+
+    Le décodeur imagecodecs alloue l'image entière : le contrôle anti-bombe de
+    Pillow, appliqué après coup, ne protège pas ce format. Même plafond que
+    Pillow pour les autres formats (2 x Image.MAX_IMAGE_PIXELS).
+    """
+    import imagecodecs
+    try:
+        info = imagecodecs.jpegxl_info(data)
+    except Exception as exc:
+        raise ValueError("En-tête JPEG XL illisible.") from exc
+    shape = tuple(info.get('shape') or ())
+    frames = max(1, int(info.get('frames') or 1))
+    if frames > 1 and len(shape) >= 3 and shape[0] == frames:
+        height, width = shape[1], shape[2]
+    elif len(shape) >= 2:
+        height, width = shape[0], shape[1]
+    else:
+        raise ValueError("En-tête JPEG XL illisible.")
+    pixels = int(width) * int(height) * frames
+    limit = Image.MAX_IMAGE_PIXELS
+    if limit and pixels > 2 * limit:
+        raise Image.DecompressionBombError(
+            f"Image JPEG XL trop grande ({width} x {height} pixels, {frames} image(s)) : "
+            f"plafond de {2 * limit} pixels dépassé."
+        )
+
+
 try:
     from PIL import ImageFile
     import imagecodecs
@@ -22,6 +51,7 @@ try:
 
         def _open(self):
             data = self.fp.read()
+            _check_jxl_dimensions(data)
             arr = imagecodecs.jpegxl_decode(data)
             if arr.dtype == np.uint16:
                 arr = (arr / 256).astype(np.uint8)
@@ -176,11 +206,12 @@ class ImageConverter:
             source_format = (options or {}).get('source_format')
             ext = os.path.splitext(input_path)[1].lower()
             if source_format == 'jxl' or ext == '.jxl':
+                with open(input_path, 'rb') as f:
+                    data = f.read()
+                _check_jxl_dimensions(data)
                 try:
                     import imagecodecs
                     import numpy as np
-                    with open(input_path, 'rb') as f:
-                        data = f.read()
                     arr = imagecodecs.jpegxl_decode(data)
                     if arr.dtype == np.uint16:
                         arr = (arr / 256).astype(np.uint8)
