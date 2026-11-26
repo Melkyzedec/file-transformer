@@ -5,6 +5,8 @@ import xml.etree.ElementTree as ET
 from PIL import Image
 import resvg_py
 
+from converters.options import parse_keep_aspect_ratio, parse_quality
+
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
@@ -132,6 +134,8 @@ class ImageConverter:
             options = {}
 
         ext_out = os.path.splitext(output_path)[1].lower().replace('.', '')
+        parse_quality(options)
+        parse_keep_aspect_ratio(options)
 
         if ImageConverter._is_svg_source(input_path, options):
             return ImageConverter._convert_svg(input_path, output_path, options)
@@ -173,7 +177,7 @@ class ImageConverter:
     def _resize_image(img: Image.Image, options: dict) -> Image.Image:
         width = options.get('width')
         height = options.get('height')
-        keep_aspect = options.get('keep_aspect_ratio', True)
+        keep_aspect = parse_keep_aspect_ratio(options)
 
         if width is not None or height is not None:
             orig_w, orig_h = img.size
@@ -291,7 +295,7 @@ class ImageConverter:
             try:
                 import imagecodecs
                 import numpy as np
-                quality = int(options.get('quality', 90))
+                quality = parse_quality(options)
                 arr = np.array(img)
                 data = imagecodecs.jpegxl_encode(arr, level=quality)
                 with open(output_path, 'wb') as f:
@@ -304,7 +308,7 @@ class ImageConverter:
         save_args = {}
 
         if ext_out in ImageConverter.LOSSY_OUTPUTS:
-            save_args['quality'] = int(options.get('quality', 90))
+            save_args['quality'] = parse_quality(options)
             if ext_out in ImageConverter.JPEG_OUTPUTS:
                 save_args['progressive'] = True
 

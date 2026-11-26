@@ -16,6 +16,8 @@ from xhtml2pdf import pisa
 from xhtml2pdf.config.resources import ResourceAccessPolicy
 from xhtml2pdf.default import DEFAULT_CSS
 
+from converters.options import parse_quality
+
 logging.getLogger('xhtml2pdf').setLevel(logging.ERROR)
 
 
@@ -280,7 +282,7 @@ class DocumentConverter:
                 if dpi < DocumentConverter.MIN_DPI or dpi > DocumentConverter.MAX_DPI:
                     raise ValueError(f"Le DPI doit être compris entre {DocumentConverter.MIN_DPI} et {DocumentConverter.MAX_DPI}.")
                 scale = dpi / 72
-                quality = int(options.get('quality', 90))
+                quality = parse_quality(options)
                 DocumentConverter._check_pdf_render_size(doc, page_count, scale, dpi)
                 try:
                     return DocumentConverter._render_pdf_pages(
