@@ -336,10 +336,13 @@ def _detect_text(head, path):
         return ('txt', False)
 
     low = stripped[:2048].lower()
+    root = _first_element_name(stripped)
 
-    if '<svg' in low:
+    # Un SVG commence par <svg (après prologue XML, commentaires ou DOCTYPE).
+    # Un <svg> plus loin n'est qu'une icône inline dans du HTML.
+    if root == 'svg':
         return ('svg', True)
-    if low.startswith('<!doctype html') or low.startswith('<html') or '<html' in low[:512]:
+    if low.startswith('<!doctype html') or root == 'html' or '<html' in low[:512]:
         return ('html', True)
     if stripped[0] in '{[' and _is_json(path):
         return ('json', True)
@@ -356,6 +359,31 @@ def _detect_text(head, path):
         return ('csv', False)
 
     return ('txt', False)
+
+
+_PROLOG = re.compile(
+    r"""\s*(?:
+        <\?.*?\?>                                  # déclaration XML, instructions
+      | <!--.*?-->                                  # commentaires
+      | <!doctype[^\[>]*(?:\[.*?\]\s*)?>           # DOCTYPE, sous-ensemble interne compris
+    )""",
+    re.IGNORECASE | re.DOTALL | re.VERBOSE,
+)
+_ELEMENT = re.compile(r"\s*<([a-zA-Z][\w.:-]*)")
+
+
+def _first_element_name(text):
+    """Nom (sans préfixe d'espace de noms) du premier élément, ou None."""
+    position = 0
+    while True:
+        match = _PROLOG.match(text, position)
+        if not match or match.end() == position:
+            break
+        position = match.end()
+    match = _ELEMENT.match(text, position)
+    if not match:
+        return None
+    return match.group(1).rsplit(':', 1)[-1].lower()
 
 
 def _is_json(path):
