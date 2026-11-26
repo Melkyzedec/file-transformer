@@ -1,6 +1,7 @@
 import html
 from html.parser import HTMLParser
 import logging
+import math
 import os
 import re
 import zipfile
@@ -8,6 +9,7 @@ import zipfile
 import docx
 import markdown
 import pypdfium2 as pdfium
+from PIL import Image
 from xhtml2pdf import pisa
 from xhtml2pdf.config.resources import ResourceAccessPolicy
 from xhtml2pdf.default import DEFAULT_CSS
@@ -61,6 +63,11 @@ class DocumentConverter:
     MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
     MAX_DOCX_ENTRIES = 2000
     MAX_DOCX_COMPRESSION_RATIO = 100
+    # Export PDF -> images : plafonds vérifiés sur les dimensions déclarées
+    # des pages, avant tout rendu (un PDF de quelques octets peut déclarer une
+    # page de 14 400 pt de côté).
+    MAX_PDF_IMAGE_PAGES = 500
+    MAX_RENDER_DIMENSION = 16384
 
     SUPPORTED_INPUTS = {'.pdf', '.docx', '.md', '.markdown', '.mdown', '.html', '.htm',
                         '.xhtml', '.txt', '.text', '.log'}
@@ -135,7 +142,6 @@ class DocumentConverter:
         try:
             if ext_out in ('jpg', 'jpeg'):
                 if img.mode in ('RGBA', 'LA', 'P'):
-                    from PIL import Image
                     if img.mode == 'P':
                         img = img.convert('RGBA')
                     background = Image.new('RGB', img.size, (255, 255, 255))
@@ -158,6 +164,51 @@ class DocumentConverter:
             textpage.close()
 
     @staticmethod
+    def _check_pdf_render_size(doc, page_count: int, scale: float, dpi: int) -> None:
+        """Refuse un export trop lourd avant d'allouer la moindre image."""
+        if page_count > DocumentConverter.MAX_PDF_IMAGE_PAGES:
+            raise ValueError(
+                f"Le PDF compte {page_count} pages : l'export en images est limité à "
+                f"{DocumentConverter.MAX_PDF_IMAGE_PAGES} pages."
+            )
+        max_side = DocumentConverter.MAX_RENDER_DIMENSION
+        max_pixels = 2 * Image.MAX_IMAGE_PIXELS if Image.MAX_IMAGE_PIXELS else None
+        for index in range(page_count):
+            width_pt, height_pt = doc.get_page_size(index)
+            width = math.ceil(width_pt * scale)
+            height = math.ceil(height_pt * scale)
+            if width > max_side or height > max_side or (max_pixels and width * height > max_pixels):
+                raise ValueError(
+                    f"La page {index + 1} ferait {width} x {height} pixels à {dpi} DPI : plafond de "
+                    f"{max_side} pixels de côté et {max_pixels} pixels au total. Réduisez le DPI."
+                )
+
+    @staticmethod
+    def _render_pdf_pages(doc, page_count: int, output_path: str, ext_out: str,
+                          scale: float, quality: int) -> str:
+        out_dir = os.path.dirname(output_path)
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+
+        if page_count == 1:
+            page = doc[0]
+            try:
+                DocumentConverter._save_pdf_page_image(page, output_path, ext_out, scale, quality)
+            finally:
+                page.close()
+            return output_path
+
+        created_files = []
+        for i in range(page_count):
+            page = doc[i]
+            try:
+                p_path = os.path.join(out_dir, f"{base_name}_page_{i+1}.{ext_out}")
+                DocumentConverter._save_pdf_page_image(page, p_path, ext_out, scale, quality)
+                created_files.append(p_path)
+            finally:
+                page.close()
+        return created_files[0] if created_files else output_path
+
+    @staticmethod
     def _convert_pdf(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         doc = pdfium.PdfDocument(input_path)
         try:
@@ -174,28 +225,15 @@ class DocumentConverter:
                     raise ValueError(f"Le DPI doit être compris entre {DocumentConverter.MIN_DPI} et {DocumentConverter.MAX_DPI}.")
                 scale = dpi / 72
                 quality = int(options.get('quality', 90))
-
-                out_dir = os.path.dirname(output_path)
-                base_name = os.path.splitext(os.path.basename(output_path))[0]
-
-                if page_count == 1:
-                    page = doc[0]
-                    try:
-                        DocumentConverter._save_pdf_page_image(page, output_path, ext_out, scale, quality)
-                    finally:
-                        page.close()
-                    return output_path
-
-                created_files = []
-                for i in range(page_count):
-                    page = doc[i]
-                    try:
-                        p_path = os.path.join(out_dir, f"{base_name}_page_{i+1}.{ext_out}")
-                        DocumentConverter._save_pdf_page_image(page, p_path, ext_out, scale, quality)
-                        created_files.append(p_path)
-                    finally:
-                        page.close()
-                return created_files[0] if created_files else output_path
+                DocumentConverter._check_pdf_render_size(doc, page_count, scale, dpi)
+                try:
+                    return DocumentConverter._render_pdf_pages(
+                        doc, page_count, output_path, ext_out, scale, quality
+                    )
+                except MemoryError as exc:
+                    raise MemoryError(
+                        "Mémoire insuffisante pour rendre le PDF en images. Réduisez le DPI."
+                    ) from exc
 
             elif ext_out in ('txt', 'md'):
                 full_text = []
