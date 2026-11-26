@@ -10,7 +10,7 @@ Application Windows pour convertir des images (PNG, JPEG/JFIF, WebP, JXL, ICO, G
 
 ### Prérequis
 
-- [Python 3.14 x64](https://www.python.org/downloads/windows/) est la version recommandée. Le lanceur accepte aussi un Python utilisable à partir de la version 3.10. Il peut utiliser un Python standard installé pour votre compte ou un Python déjà disponible dans `.runtime\python\python.exe`.
+- [Python 3.14 x64](https://www.python.org/downloads/windows/) est la version recommandée. Le lanceur accepte aussi un Python utilisable à partir de la version 3.12 (les versions épinglées de NumPy et imagecodecs l’exigent). Il peut utiliser un Python standard installé pour votre compte ou un Python déjà disponible dans `.runtime\python\python.exe`.
 - [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/#download-section) sert à afficher l’interface Windows.
 - Le dossier extrait doit être accessible en écriture et le premier lancement doit pouvoir télécharger les dépendances Python.
 
