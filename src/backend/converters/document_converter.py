@@ -22,26 +22,54 @@ logging.getLogger('xhtml2pdf').setLevel(logging.ERROR)
 
 
 class _HtmlTextExtractor(HTMLParser):
-    """Extrait le texte visible d'un document HTML en ignorant script/style/noscript."""
+    """Extrait le texte visible d'un document HTML.
 
-    _SKIP_TAGS = {'script', 'style', 'noscript'}
+    Ignore script, style, noscript, template, title, head, svg et iframe. Un
+    <head> resté ouvert (sans </head>, ce que HTML5 permet) se referme au
+    premier élément qui ne peut pas y figurer, comme le ferait un navigateur.
+    """
+
+    _SKIP_TAGS = {'script', 'style', 'noscript', 'template', 'title', 'head', 'svg', 'iframe'}
+    _HEAD_CONTENT = {'title', 'meta', 'link', 'style', 'script', 'base', 'noscript', 'template'}
     _BLOCK_TAGS = {'p', 'div', 'br', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'blockquote'}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self._skip_depth = 0
+        self._head_open = False
         self._parts = []
+
+    def _close_head(self):
+        if self._head_open:
+            self._head_open = False
+            self._skip_depth = max(0, self._skip_depth - 1)
 
     def handle_starttag(self, tag, attrs):
         t = tag.lower()
-        if t in self._SKIP_TAGS:
+        if self._head_open and t not in self._HEAD_CONTENT and self._skip_depth == 1:
+            self._close_head()
+        if t == 'head':
+            if not self._head_open:
+                self._head_open = True
+                self._skip_depth += 1
+        elif t in self._SKIP_TAGS:
             self._skip_depth += 1
         elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
             self._parts.append('\n')
 
+    def handle_startendtag(self, tag, attrs):
+        t = tag.lower()
+        if t in self._SKIP_TAGS:
+            return  # <svg/> ou <iframe/> vides : rien à ignorer
+        self.handle_starttag(tag, attrs)
+
     def handle_endtag(self, tag):
         t = tag.lower()
-        if t in self._SKIP_TAGS and self._skip_depth > 0:
+        if t == 'head':
+            self._close_head()
+        elif t in ('body', 'html'):
+            self._close_head()
+        elif t in self._SKIP_TAGS and self._skip_depth > 0:
             self._skip_depth -= 1
         elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
             self._parts.append('\n')
