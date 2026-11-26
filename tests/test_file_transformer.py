@@ -67,6 +67,14 @@ class TestFT01OpenFolderSecurity(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
         self.api = AppAPI()
+        # Portable hors Windows : un explorer.exe factice sous un SystemRoot
+        # temporaire. Popen est toujours remplacé par un mock dans ces tests.
+        fake_system_root = self.root / "CANARY_TEST_SystemRoot"
+        fake_system_root.mkdir()
+        (fake_system_root / "explorer.exe").write_bytes(b"CANARY_TEST")
+        patcher = mock.patch.dict(os.environ, {"SystemRoot": str(fake_system_root)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_app_api_source_never_uses_shell_true(self):
         source = (BACKEND_DIR / "app_api.py").read_text(encoding="utf-8")
