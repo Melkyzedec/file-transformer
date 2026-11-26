@@ -158,7 +158,7 @@ class AppAPI:
             return {'success': False, 'input_path': input_path, 'error': "Les liens symboliques ne sont pas autorisés en entrée."}
 
         if not os.path.isfile(input_path):
-            return {'success': False, 'error': f"Fichier introuvable : {input_path}"}
+            return {'success': False, 'error': f"Fichier introuvable : {os.path.basename(input_path)}"}
 
         detection = format_detector.detect(input_path)
         if not isinstance(target_format, str) or not target_format.replace('.', '').isalnum():
@@ -240,8 +240,28 @@ class AppAPI:
             return {
                 'success': False,
                 'input_path': input_path,
-                'error': str(e)
+                'error': self._public_error(e, (os.path.dirname(os.path.abspath(input_path)), destination))
             }
+
+    @staticmethod
+    def _public_error(error, directories):
+        """Message d'erreur affichable : sans dossier complet, jamais vide."""
+        if isinstance(error, MemoryError) and not str(error).strip():
+            return "Mémoire insuffisante pour cette conversion. Réduisez la taille ou la résolution."
+        message = str(error).strip() or f"Erreur inattendue pendant la conversion ({type(error).__name__})."
+        prefixes = set()
+        for directory in directories:
+            for variant in (str(directory), os.path.abspath(str(directory))):
+                variant = variant.rstrip('\\/')
+                if len(variant) > 3:  # jamais une simple racine (« / », « C: »)
+                    prefixes.add(variant)
+        # Du plus long au plus court, y compris la forme échappée des repr() Windows.
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            for form in (prefix, prefix.replace('\\', '\\\\')):
+                for separator in ('\\\\', '\\', '/'):
+                    message = message.replace(form + separator, '')
+                message = message.replace(form, '…')
+        return message
 
     @staticmethod
     def _publish_outputs(staged_files, destination, stem):
