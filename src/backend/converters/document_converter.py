@@ -9,6 +9,7 @@ import docx
 import markdown
 import pypdfium2 as pdfium
 from xhtml2pdf import pisa
+from xhtml2pdf.config.resources import ResourceAccessPolicy
 from xhtml2pdf.default import DEFAULT_CSS
 
 logging.getLogger('xhtml2pdf').setLevel(logging.ERROR)
@@ -74,6 +75,10 @@ class DocumentConverter:
     }
 
     _PDF_BASE_CSS = DEFAULT_CSS + "\n@page { size: a4 portrait; margin: 36pt; }\n"
+
+    # Aucune ressource externe : ni réseau (allow_remote=False), ni fichier local
+    # (base_dir=None refuse toute lecture). Les images data: restent rendues.
+    _PDF_RESOURCE_POLICY = ResourceAccessPolicy(allow_remote=False, base_dir=None)
 
     @staticmethod
     def convert(input_path: str, output_path: str, options: dict = None) -> str:
@@ -373,7 +378,11 @@ th {{ background-color: #f2f2f2; }}
 
     @staticmethod
     def _block_external_resource(uri: str, rel: str) -> str:
-        """Bloque le chargement de ressources réseau ou locales externes depuis du HTML."""
+        """Point d'observation des ressources demandées par le HTML.
+
+        Une valeur vide laisse l'URI d'origine à xhtml2pdf : le blocage effectif
+        est assuré par _PDF_RESOURCE_POLICY, pas par ce rappel.
+        """
         return ''
 
     @staticmethod
@@ -403,6 +412,7 @@ th {{ background-color: #f2f2f2; }}
                 encoding='utf-8',
                 default_css=DocumentConverter._PDF_BASE_CSS,
                 link_callback=DocumentConverter._block_external_resource,
+                resource_policy=DocumentConverter._PDF_RESOURCE_POLICY,
             )
         if status.err or not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
             raise RuntimeError(f"Échec de la génération PDF ({status.err} erreur(s)).")
