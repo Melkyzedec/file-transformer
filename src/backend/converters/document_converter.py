@@ -8,6 +8,8 @@ import zipfile
 
 import docx
 import markdown
+from markdown.extensions import Extension
+from markdown.treeprocessors import Treeprocessor
 import pypdfium2 as pdfium
 from PIL import Image
 from xhtml2pdf import pisa
@@ -50,6 +52,43 @@ class _HtmlTextExtractor(HTMLParser):
         raw = ''.join(self._parts)
         lines = [line.strip() for line in raw.splitlines()]
         return '\n'.join(line for line in lines if line)
+
+
+class _NeutralizeActiveHtml(Treeprocessor):
+    """Retire de l'arbre Markdown tout attribut capable d'exécuter du code."""
+
+    _URL_ATTRIBUTES = {'href', 'src', 'action', 'formaction', 'xlink:href', 'background', 'poster'}
+    _SAFE_DATA_IMAGES = ('data:image/png', 'data:image/jpeg', 'data:image/gif', 'data:image/webp')
+
+    def run(self, root):
+        for element in root.iter():
+            for name in list(element.attrib):
+                lowered = name.lower()
+                if lowered.startswith('on'):
+                    del element.attrib[name]
+                elif lowered in self._URL_ATTRIBUTES and not self._is_safe_url(element.tag, element.attrib[name]):
+                    del element.attrib[name]
+
+    @classmethod
+    def _is_safe_url(cls, tag, value) -> bool:
+        # Les navigateurs ignorent blancs et caractères de contrôle et décodent
+        # les entités avant de lire le schéma (« Java&#09;Script: »).
+        normalized = ''.join(ch for ch in html.unescape(value) if ch > ' ').lower()
+        if normalized.startswith(('javascript:', 'vbscript:')):
+            return False
+        if normalized.startswith('data:'):
+            return tag == 'img' and normalized.startswith(cls._SAFE_DATA_IMAGES)
+        return True
+
+
+class _SafeMarkdownExtension(Extension):
+    """Markdown sans HTML actif : le HTML brut est échappé, les URL dangereuses retirées."""
+
+    def extendMarkdown(self, md):
+        md.preprocessors.deregister('html_block', strict=False)
+        md.inlinePatterns.deregister('html', strict=False)
+        # Après attr_list (priorité 8), qui peut ajouter des attributs.
+        md.treeprocessors.register(_NeutralizeActiveHtml(md), 'neutralize_active_html', 1)
 
 
 class DocumentConverter:
@@ -344,7 +383,10 @@ class DocumentConverter:
     def _convert_markdown(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         md_content = DocumentConverter._read_text(input_path)
 
-        html_body = markdown.markdown(md_content, extensions=['extra', 'codehilite', 'tables', 'toc'])
+        html_body = markdown.markdown(
+            md_content,
+            extensions=['extra', 'codehilite', 'tables', 'toc', _SafeMarkdownExtension()],
+        )
         full_html = f"""<!DOCTYPE html>
 <html>
 <head>
