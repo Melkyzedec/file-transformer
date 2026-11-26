@@ -1,6 +1,7 @@
 import gzip
 import io
 import os
+import xml.etree.ElementTree as ET
 from PIL import Image
 import resvg_py
 
@@ -39,6 +40,12 @@ try:
     Image.register_mime('JXL', 'image/jxl')
 except Exception:
     pass
+
+
+_SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+_XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink'
+ET.register_namespace('', _SVG_NAMESPACE)
+ET.register_namespace('xlink', _XLINK_NAMESPACE)
 
 
 class ImageConverter:
@@ -225,6 +232,28 @@ class ImageConverter:
         return raw.decode('utf-8', errors='replace')
 
     @staticmethod
+    def _strip_external_svg_references(svg_text: str) -> str:
+        """Retire tout href qui n'est ni interne (#id) ni intégré (data:).
+
+        resvg lit sinon les fichiers locaux désignés par <image href="...">.
+        Le document est analysé (entités internes développées, entités externes
+        non chargées) puis resérialisé : aucune référence ne peut se cacher dans
+        une entité.
+        """
+        try:
+            root = ET.fromstring(svg_text)
+        except ET.ParseError as exc:
+            raise ValueError(f"SVG invalide : {exc}") from exc
+        for element in root.iter():
+            for name in list(element.attrib):
+                if name.rsplit('}', 1)[-1] != 'href':
+                    continue
+                value = element.attrib[name].strip()
+                if not (value.startswith('#') or value[:5].lower() == 'data:'):
+                    del element.attrib[name]
+        return ET.tostring(root, encoding='unicode')
+
+    @staticmethod
     def _save(img: Image.Image, output_path: str, ext_out: str, options: dict) -> None:
         """Enregistre l'image dans le format demandé avec les bonnes options."""
         if ext_out == 'jxl':
@@ -271,7 +300,9 @@ class ImageConverter:
         zoom = dpi / 72
 
         try:
-            svg_text = ImageConverter._read_svg_text(input_path)
+            svg_text = ImageConverter._strip_external_svg_references(
+                ImageConverter._read_svg_text(input_path)
+            )
             png_bytes = resvg_py.svg_to_bytes(svg_string=svg_text, zoom=zoom)
             with Image.open(io.BytesIO(png_bytes)) as img:
                 img = ImageConverter._resize_image(img, options)
