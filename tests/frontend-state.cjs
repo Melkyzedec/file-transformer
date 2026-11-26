@@ -90,5 +90,14 @@ const run = code => vm.runInContext(code, context);
   assert.equal(run('formatBytes(NaN)'), '0 o');
   assert.equal(run('formatBytes(1024 ** 6)').includes('undefined'), false);
 
-  console.log('OK : file vide, formats/preset, absence de pont, succès/erreur simulés, format non pris en charge, anti-XSS, formatBytes, restauration des commandes.');
+  // m11 : escapeHtml conserve 0 et false, n'efface que null/undefined
+  assert.equal(run('escapeHtml(0)'), '0');
+  assert.equal(run('escapeHtml(false)'), 'false');
+  assert.equal(run('escapeHtml(null)'), '');
+  assert.equal(run('escapeHtml(undefined)'), '');
+  elements.get('history-list').children = [];
+  run(`state.history = [{ name: 'CANARY_TEST.png', outputName: 'CANARY_TEST.webp', outputPath: 'CANARY_TEST.webp', duration: 0, status: 'success' }]; renderHistory();`);
+  assert.ok(elements.get('history-list').children.map(c => c.innerHTML).join('').includes('Temps: 0s'), 'Durée 0 affichée vide');
+
+  console.log('OK : file vide, formats/preset, absence de pont, succès/erreur simulés, format non pris en charge, anti-XSS, formatBytes, escapeHtml(0), restauration des commandes.');
 })().catch(e => { console.error(e); process.exitCode = 1; });
