@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 
@@ -8,6 +9,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src', 'backend'))
 import webview
 from webview.dom import DOMEventHandler
 from app_api import AppAPI
+
+def configure_debug_logging():
+    """
+    Lancement avec console (« Lancer File Transformer.bat debug » ou python.exe) :
+    affiche le détail technique des échecs, que l'interface ne montre jamais.
+    Sans console (pythonw.exe), rien n'est configuré.
+    """
+    if sys.stderr is None:
+        return
+    logger = logging.getLogger('file_transformer')
+    if logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter('[File Transformer] %(levelname)s %(message)s'))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+
 
 def build_drop_script(api, event):
     """
@@ -25,6 +43,7 @@ def build_drop_script(api, event):
 
 
 def main():
+    configure_debug_logging()
     api = AppAPI()
 
     frontend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'src', 'frontend', 'index.html'))

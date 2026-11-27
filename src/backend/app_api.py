@@ -1,6 +1,10 @@
+import errno
+import logging
 import os
+import re
 import time
 import subprocess
+import traceback
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,6 +12,44 @@ import webview
 import format_detector
 from converters.image_converter import ImageConverter
 from converters.document_converter import DocumentConverter
+from PIL import Image
+
+# Détail technique des échecs (bibliothèque, chemin complet) : journal de
+# débogage seulement, jamais affiché dans l'interface.
+logger = logging.getLogger('file_transformer')
+_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+
+_ACTION_RETRY = "Réessayez ; si le problème continue, choisissez un autre format de sortie."
+
+# Messages écrits par nos convertisseurs, reformulés en « cause + action » sans
+# jargon. Les mots-clés vérifiés par les tests de sécurité restent présents.
+_OWN_MESSAGE_REWRITES = (
+    ("trop d'entrées", "Ce document Word est trop complexe (trop d'entrées internes) : il n'a pas été ouvert, "
+                       "par précaution. Réenregistrez-le depuis Word, puis réessayez."),
+    ("chemin interdit", "Ce document Word contient un chemin interdit : il n'a pas été ouvert, par précaution. "
+                        "Réenregistrez-le depuis Word, puis réessayez."),
+    ("Ratio de compression suspect", "Ce document Word n'a pas été ouvert, par précaution. Ratio de compression "
+                                     "suspect : une fois décompressé, il serait anormalement gros. "
+                                     "Réenregistrez-le depuis Word, puis réessayez."),
+    ("trop volumineuse après décompression", "Ce document Word dépasse 50 Mo une fois décompressé : il n'a pas "
+                                             "été ouvert. Réduisez la taille des images qu'il contient, puis réessayez."),
+    ("Fichier DOCX corrompu", "Ce document Word n'a pas pu être ouvert : il est peut-être abîmé. "
+                              "Ouvrez-le dans Word et réenregistrez-le, puis réessayez."),
+    ("Échec de la génération PDF", "Le PDF n'a pas pu être créé à partir de ce document. "
+                                   "Réessayez avec une autre sortie (HTML ou TXT)."),
+    ("ne contient aucune page", "Ce PDF ne contient aucune page : il n'y a rien à convertir. Retirez-le de la liste."),
+    ("aucun fichier", "La conversion n'a produit aucun fichier. " + _ACTION_RETRY),
+    ("En-tête JPEG XL illisible", None),  # même message qu'un fichier abîmé
+)
+_OWN_MESSAGE_ACTIONS = (
+    ("l'export en images est limité", " Exportez-le plutôt en texte (TXT) ou découpez-le en plusieurs PDF."),
+    ("plafond 10 Mo", " Simplifiez le dessin ou exportez-le en PNG depuis son logiciel, puis réessayez."),
+    ("trop grande", " Réduisez ses dimensions dans un autre logiciel, puis réessayez."),
+    ("Un dossier occupe la sortie", " Renommez ce dossier ou choisissez un autre dossier de destination."),
+    ("Sorties partielles", " Retirez ces fichiers du dossier de destination, puis réessayez."),
+    ("doit être", " Corrigez la valeur dans les réglages avancés, puis réessayez."),
+    ("est invalide", " Corrigez la valeur dans les réglages avancés, puis réessayez."),
+)
 
 class AppAPI:
     """
@@ -186,40 +228,50 @@ class AppAPI:
             options = {}
 
         if not isinstance(input_path, str) or not input_path.strip():
-            return {'success': False, 'error': "Chemin d'entrée invalide."}
+            return {'success': False, 'error': "Ce fichier n'a pas pu être trouvé (chemin vide). Ajoutez-le à nouveau à la liste."}
 
         if self._is_windows_reserved_path(input_path):
-            return {'success': False, 'input_path': input_path, 'error': "Nom de périphérique Windows réservé interdit."}
+            return {'success': False, 'input_path': input_path, 'error': (
+                "Ce nom est réservé par Windows (CON, NUL, COM1…) et ne peut pas être utilisé. "
+                "Renommez le fichier ou son dossier, puis ajoutez-le à nouveau.")}
 
         if output_dir is not None:
             if not isinstance(output_dir, str) or not output_dir.strip() or self._is_windows_reserved_path(output_dir):
-                return {'success': False, 'input_path': input_path, 'error': "Dossier de destination invalide."}
+                return {'success': False, 'input_path': input_path, 'error': (
+                    "Le dossier de destination n'est pas utilisable. Choisissez-en un autre.")}
             if os.path.islink(output_dir):
-                return {'success': False, 'input_path': input_path, 'error': "Les liens symboliques ne sont pas autorisés en destination."}
+                return {'success': False, 'input_path': input_path, 'error': (
+                    "Le dossier de destination est un raccourci ou un lien. Choisissez directement le dossier réel.")}
 
         if os.path.islink(input_path):
-            return {'success': False, 'input_path': input_path, 'error': "Les liens symboliques ne sont pas autorisés en entrée."}
+            return {'success': False, 'input_path': input_path, 'error': (
+                "Les raccourcis et liens ne sont pas pris en charge. Ajoutez directement le fichier d'origine.")}
 
         if not os.path.isfile(input_path):
-            return {'success': False, 'error': f"Fichier introuvable : {os.path.basename(input_path)}"}
+            return {'success': False, 'error': (
+                f"Fichier introuvable : {os.path.basename(input_path)}. Il a peut-être été déplacé ou supprimé ; "
+                "ajoutez-le à nouveau à la liste.")}
 
         detection = format_detector.detect(input_path)
         if not isinstance(target_format, str) or not target_format.replace('.', '').isalnum():
-            return {'success': False, 'input_path': input_path, 'error': 'Format de sortie invalide.'}
+            return {'success': False, 'input_path': input_path, 'error': (
+                "Format de sortie non reconnu. Choisissez un format dans la liste.")}
         target_format = target_format.lower().replace('.', '')
 
         if not detection['format']:
             return {
                 'success': False,
                 'input_path': input_path,
-                'error': "Format du fichier non reconnu."
+                'error': ("Le type de ce fichier n'a pas été reconnu : il ne peut pas être converti ici. "
+                          "Retirez-le de la liste."),
             }
 
         if not detection['supported']:
             return {
                 'success': False,
                 'input_path': input_path,
-                'error': f"Format reconnu ({detection['label']}) mais non pris en charge en entrée."
+                'error': (f"Ce fichier ({detection['label']}) ne peut pas être converti ici. "
+                          "Enregistrez-le en PDF depuis son logiciel, puis ajoutez ce PDF."),
             }
 
         allowed_outputs = (
@@ -233,7 +285,8 @@ class AppAPI:
             return {
                 'success': False,
                 'input_path': input_path,
-                'error': f"Format de sortie non autorisé : {target_format}"
+                'error': (f"La sortie {target_format.upper()} n'est pas disponible pour ce fichier. "
+                          "Choisissez une autre sortie dans la liste."),
             }
 
         if detection['category'] == 'document':
@@ -250,7 +303,8 @@ class AppAPI:
 
         destination = Path(output_dir or os.path.dirname(input_path) or '.')
         if not destination.is_dir():
-            return {'success': False, 'input_path': input_path, 'error': "Dossier de destination introuvable."}
+            return {'success': False, 'input_path': input_path, 'error': (
+                "Le dossier de destination n'existe plus. Choisissez-en un autre.")}
 
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         output_stem = f"{base_name}_converted"
@@ -267,7 +321,8 @@ class AppAPI:
             elif detection['category'] == 'document':
                 convert = DocumentConverter.convert
             else:
-                return {'success': False, 'error': f"Format d'entrée non supporté : {detection['label']}"}
+                return {'success': False, 'error': (
+                    f"Ce fichier ({detection['label']}) ne peut pas être converti ici. Retirez-le de la liste.")}
 
             with TemporaryDirectory(prefix='.file-transformer-', dir=destination) as directory:
                 staging = Path(directory)
@@ -292,18 +347,91 @@ class AppAPI:
                 'size': final_output.stat().st_size
             }
         except Exception as e:
+            logger.debug("Échec de conversion de %s vers %s", input_path, target_format, exc_info=e)
             return {
                 'success': False,
                 'input_path': input_path,
-                'error': self._public_error(e, (os.path.dirname(os.path.abspath(input_path)), destination))
+                'error': self._public_error(
+                    e, (os.path.dirname(os.path.abspath(input_path)), destination),
+                    input_name=os.path.basename(input_path), source_format=detection['format'],
+                )
             }
 
     @staticmethod
-    def _public_error(error, directories):
-        """Message d'erreur affichable : sans dossier complet, jamais vide."""
-        if isinstance(error, MemoryError) and not str(error).strip():
+    def _raised_by_app(error) -> bool:
+        """Vrai si le message a été écrit par nos convertisseurs (en français).
+
+        L'exception doit venir d'une instruction « raise Xxx(...) » de src/backend
+        et ne pas recopier le message brut d'une bibliothèque.
+        """
+        frames = traceback.extract_tb(error.__traceback__)
+        if not frames:
+            return False
+        last = frames[-1]
+        line = (last.line or '').strip()
+        if not os.path.abspath(last.filename).startswith(_BACKEND_DIR + os.sep):
+            return False
+        if not line.startswith('raise ') or re.fullmatch(r'raise\s+\w+', line):
+            return False
+        cause = error.__cause__
+        return not (cause is not None and str(cause).strip() and str(cause).strip() in str(error))
+
+    @staticmethod
+    def _unreadable_message(name, source_format) -> str:
+        if source_format == 'pdf':
+            return (f"Le PDF « {name} » n'a pas pu être ouvert : il est peut-être abîmé ou protégé par un mot "
+                    "de passe. Ouvrez-le dans un lecteur PDF pour vérifier, puis réessayez.")
+        if source_format == 'docx':
+            return (f"Le document Word « {name} » n'a pas pu être lu : il est peut-être abîmé. "
+                    "Ouvrez-le dans Word et réenregistrez-le, puis réessayez.")
+        if source_format == 'svg':
+            return (f"Le dessin SVG « {name} » n'a pas pu être lu : il est peut-être abîmé, incomplet ou vide. "
+                    "Ouvrez-le dans son logiciel pour vérifier, puis réessayez.")
+        if source_format in format_detector.FORMATS and format_detector.FORMATS[source_format]['category'] == 'image':
+            return (f"L'image « {name} » n'a pas pu être lue : elle est peut-être abîmée ou incomplète. "
+                    "Ouvrez-la dans un autre logiciel pour vérifier, puis réessayez ou retirez-la de la liste.")
+        return (f"Le fichier « {name} » n'a pas pu être lu : il est peut-être abîmé ou contient un élément non "
+                "pris en charge. Ouvrez-le dans son logiciel habituel pour vérifier, puis réessayez.")
+
+    @classmethod
+    def _friendly_message(cls, error, input_name, source_format) -> str:
+        """Cause probable + action, en français, à partir d'une exception quelconque."""
+        name = input_name or 'ce fichier'
+        if cls._raised_by_app(error) and str(error).strip():
+            message = str(error).strip()
+            for keyword, rewrite in _OWN_MESSAGE_REWRITES:
+                if keyword in message:
+                    return rewrite or cls._unreadable_message(name, source_format)
+            for keyword, action in _OWN_MESSAGE_ACTIONS:
+                if keyword in message:
+                    return message + action
+            return message
+        if isinstance(error, MemoryError):
             return "Mémoire insuffisante pour cette conversion. Réduisez la taille ou la résolution."
-        message = str(error).strip() or f"Erreur inattendue pendant la conversion ({type(error).__name__})."
+        if isinstance(error, OSError) and error.errno is not None:
+            target = os.path.basename(str(error.filename)) if error.filename else name
+            if isinstance(error, PermissionError):
+                return (f"Accès refusé à « {target} ». Fermez ce fichier s'il est ouvert dans un autre logiciel, "
+                        "ou choisissez un autre dossier de destination.")
+            if error.errno == errno.ENOSPC:
+                return (f"Espace disque insuffisant pour créer « {target} ». Libérez de la place ou choisissez "
+                        "un autre dossier de destination.")
+            if isinstance(error, FileNotFoundError):
+                return (f"Fichier introuvable : « {target} ». Il a peut-être été déplacé ou supprimé ; "
+                        "ajoutez-le à nouveau à la liste.")
+            return (f"« {target} » n'a pas pu être lu ou écrit. Vérifiez que le dossier de destination est "
+                    "accessible, ou choisissez-en un autre.")
+        if isinstance(error, (Image.DecompressionBombError, Image.DecompressionBombWarning)):
+            return (f"L'image « {name} » est trop grande pour être convertie sans risque. "
+                    "Réduisez ses dimensions dans un autre logiciel, puis réessayez.")
+        return cls._unreadable_message(name, source_format)
+
+    @classmethod
+    def _public_error(cls, error, directories, input_name=None, source_format=None):
+        """Message d'erreur affichable : français clair, sans dossier complet, jamais vide."""
+        message = cls._friendly_message(error, input_name, source_format).strip()
+        if not message:
+            message = f"Erreur inattendue pendant la conversion. {_ACTION_RETRY}"
         prefixes = set()
         for directory in directories:
             for variant in (str(directory), os.path.abspath(str(directory))):

@@ -9,8 +9,6 @@ Données exclusivement fictives (CANARY_TEST_).
 
 import errno
 import io
-import os
-import re
 import sys
 import unittest
 import zipfile
@@ -181,6 +179,30 @@ class TestControlesAvantConversion(_MessagesCase):
         pdf.write_bytes(_minimal_pdf(media_box=(0, 0, 20, 20), pages=501))
         message = self.assertFriendly(self.convert(pdf, "png", dpi=72), "pages")
         self.assertIn("TXT", message)
+
+
+class TestJournalDebogage(unittest.TestCase):
+
+    def test_console_visible_affiche_le_detail_technique(self):
+        import logging
+        from securite_outils import REPO_ROOT
+        if str(REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(REPO_ROOT))
+        import main  # noqa: E402  (n'ouvre aucune fenêtre à l'import)
+        logger = logging.getLogger("file_transformer")
+        saved = (list(logger.handlers), logger.level)
+        self.addCleanup(lambda: (setattr(logger, "handlers", saved[0]), logger.setLevel(saved[1])))
+        logger.handlers = []
+        with mock.patch.object(sys, "stderr", None):  # pythonw.exe : aucune console
+            main.configure_debug_logging()
+        self.assertEqual(logger.handlers, [])
+        stream = io.StringIO()
+        with mock.patch.object(sys, "stderr", stream):  # lanceur « debug » : console visible
+            main.configure_debug_logging()
+            main.configure_debug_logging()  # idempotent
+            logger.debug("CANARY_TEST_detail")
+        self.assertEqual(len(logger.handlers), 1)
+        self.assertIn("CANARY_TEST_detail", stream.getvalue())
 
 
 if __name__ == "__main__":
