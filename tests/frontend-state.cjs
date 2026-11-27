@@ -169,7 +169,7 @@ const run = code => vm.runInContext(code, context);
   // UX2 : la cause de l'erreur est écrite sous le fichier (plus seulement en infobulle).
   context.window.pywebview.api.convert_single_file = async (path) => (path === 'CANARY_TEST_2.png'
     ? { success: false, error: 'CANARY_TEST_ cause lisible <b>' }
-    : { success: true, duration: 0.1, output_name: 'x.webp', output_path: 'x.webp' });
+    : { success: true, duration: 0.1, output_name: 'CANARY_TEST_x.webp', output_path: 'CANARY_TEST_x.webp' });
   await run('startBatchConversion()');
   assert.equal(notice(), 'Terminé : 2 fichiers convertis, 1 échec (cause indiquée sous le fichier).');
   html = queueNow();

@@ -17,7 +17,7 @@ from PIL import Image
 # Détail technique des échecs (bibliothèque, chemin complet) : journal de
 # débogage seulement, jamais affiché dans l'interface.
 logger = logging.getLogger('file_transformer')
-_BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+_BACKEND_DIR = os.path.normcase(os.path.dirname(os.path.abspath(__file__)))
 
 _ACTION_RETRY = "Réessayez ; si le problème continue, choisissez un autre format de sortie."
 
@@ -369,7 +369,7 @@ class AppAPI:
             return False
         last = frames[-1]
         line = (last.line or '').strip()
-        if not os.path.abspath(last.filename).startswith(_BACKEND_DIR + os.sep):
+        if not os.path.normcase(os.path.abspath(last.filename)).startswith(_BACKEND_DIR + os.sep):
             return False
         if not line.startswith('raise ') or re.fullmatch(r'raise\s+\w+', line):
             return False
