@@ -29,7 +29,7 @@ class TestM1SvgSansRessourcesLocales(_TempCase):
         super().setUp()
         other = self.root / "ailleurs"
         other.mkdir()
-        self.secret = _save_solid_png(other / "CANARY_TEST_secret.png", RED, size=(50, 50))
+        self.local_png = _save_solid_png(other / "CANARY_TEST_local_img.png", RED, size=(50, 50))
         self.svg_dir = self.root / "svg"
         self.svg_dir.mkdir()
         previous_cwd = os.getcwd()
@@ -53,18 +53,18 @@ class TestM1SvgSansRessourcesLocales(_TempCase):
         )
 
     def test_svg_never_embeds_local_image_files(self):
-        secret = self.secret
-        relative = os.path.relpath(secret, self.svg_dir).replace(os.sep, "/")
+        local_png = self.local_png
+        relative = os.path.relpath(local_png, self.svg_dir).replace(os.sep, "/")
         cases = {
-            "href absolu": self._svg(f'<image href="{secret}" width="50" height="50"/>'),
-            "xlink:href absolu": self._svg(f'<image xlink:href="{secret}" width="50" height="50"/>'),
+            "href absolu": self._svg(f'<image href="{local_png}" width="50" height="50"/>'),
+            "xlink:href absolu": self._svg(f'<image xlink:href="{local_png}" width="50" height="50"/>'),
             "href relatif": self._svg(f'<image href="{relative}" width="50" height="50"/>'),
-            "file://": self._svg(f'<image href="{secret.as_uri()}" width="50" height="50"/>'),
+            "file://": self._svg(f'<image href="{local_png.as_uri()}" width="50" height="50"/>'),
             "entité XML": self._svg(
                 "&canary;",
                 doctype=(
                     "<!DOCTYPE svg [<!ENTITY canary '<image xmlns=\"http://www.w3.org/2000/svg\" "
-                    f"href=\"{secret}\" width=\"50\" height=\"50\"/>'>]>"
+                    f"href=\"{local_png}\" width=\"50\" height=\"50\"/>'>]>"
                 ),
             ),
         }

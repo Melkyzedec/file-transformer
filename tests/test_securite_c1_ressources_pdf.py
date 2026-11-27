@@ -34,7 +34,7 @@ class TestC1RessourcesExternesPdf(_TempCase):
         previous_cwd = os.getcwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, previous_cwd)
-        self.secret = _save_solid_png(self.root / "CANARY_TEST_secret_local.png", GREEN)
+        self.local_png = _save_solid_png(self.root / "CANARY_TEST_local.png", GREEN)
 
         self.network_attempts = []
 
@@ -57,12 +57,12 @@ class TestC1RessourcesExternesPdf(_TempCase):
         return path
 
     def test_html_to_pdf_never_embeds_local_images(self):
-        secret = self.secret
+        local_png = self.local_png
         for label, fragment in (
-            ("chemin absolu", f'<img src="{secret}" width="40" height="40">'),
-            ("chemin relatif", f'<img src="{secret.name}" width="40" height="40">'),
-            ("file://", f'<img src="{secret.as_uri()}" width="40" height="40">'),
-            ("css url()", f'<div style="background-image: url({secret.name}); height: 40px">x</div>'),
+            ("chemin absolu", f'<img src="{local_png}" width="40" height="40">'),
+            ("chemin relatif", f'<img src="{local_png.name}" width="40" height="40">'),
+            ("file://", f'<img src="{local_png.as_uri()}" width="40" height="40">'),
+            ("css url()", f'<div style="background-image: url({local_png.name}); height: 40px">x</div>'),
         ):
             with self.subTest(label):
                 res = self.convert(self._html_file(fragment), "pdf")
@@ -102,8 +102,8 @@ class TestC1RessourcesExternesPdf(_TempCase):
         md_path = self.root / "CANARY_TEST_resources.md"
         md_path.write_text(
             "# CANARY_TEST_MD\n\n"
-            f"![local]({self.secret.name})\n\n"
-            f"<img src=\"{self.secret}\" width=\"40\" height=\"40\">\n\n"
+            f"![local]({self.local_png.name})\n\n"
+            f"<img src=\"{self.local_png}\" width=\"40\" height=\"40\">\n\n"
             "![pistage](https://tracker.example.test/CANARY_TEST_pixel.png)\n",
             encoding="utf-8",
         )
