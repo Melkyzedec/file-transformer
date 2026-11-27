@@ -18,14 +18,29 @@ const IMAGE_TARGETS = [
   { val: 'bmp', name: 'BMP' }
 ];
 
-const DOCUMENT_TARGETS = [
-  { val: 'pdf', name: 'PDF' },
-  { val: 'png', name: 'PNG (Image)' },
-  { val: 'jpg', name: 'JPG (Image)' },
-  { val: 'html', name: 'HTML' },
-  { val: 'txt', name: 'TXT' },
-  { val: 'md', name: 'Markdown' }
-];
+// Formats d'entrée image que le moteur sait lire (format_detector, supported=True).
+const IMAGE_SOURCES = ['png', 'jpeg', 'jfif', 'webp', 'gif', 'bmp', 'ico', 'tiff', 'svg', 'heic', 'jxl'];
+
+const DOCUMENT_TARGET_NAMES = {
+  pdf: 'PDF',
+  png: 'PNG (Image)',
+  jpg: 'JPG (Image)',
+  html: 'HTML',
+  txt: 'TXT',
+  md: 'Markdown'
+};
+
+// Sorties réellement produites par le moteur pour chaque document, d'après
+// DocumentConverter.OUTPUTS_BY_SOURCE (src/backend/converters/document_converter.py).
+// tests/test_ux_options_par_format.py croise cette table avec le moteur réel :
+// une sortie proposée qui échouerait fait échouer le test.
+const DOCUMENT_TARGETS_BY_FORMAT = {
+  pdf: ['png', 'jpg', 'txt', 'md', 'html'],
+  docx: ['pdf', 'html', 'txt', 'md'],
+  md: ['pdf', 'html', 'txt'],
+  html: ['pdf', 'txt'],
+  txt: ['pdf', 'html', 'md']
+};
 
 // DOM Elements
 const dropzone = document.getElementById('dropzone');
@@ -179,7 +194,7 @@ function addFilesToQueue(files) {
         detectionMethod: f.detection_method,
         mismatch: !!f.mismatch,
         supported: f.supported !== false,
-        targetFormat: getDefaultTargetFormat(f),
+        targetFormat: getDefaultTarget(f),
         status: f.supported === false ? 'unsupported' : 'ready',
         duration: null,
         error: null
@@ -212,8 +227,26 @@ function getDefaultTargetFormat(f) {
   return f.category === 'image' ? 'webp' : 'pdf';
 }
 
-function getTargets(category) {
-  return category === 'image' ? IMAGE_TARGETS : DOCUMENT_TARGETS;
+function getDefaultTarget(f) {
+  const targets = getTargets(f).map(t => t.val);
+  const preferred = getDefaultTargetFormat(f);
+  if (targets.indexOf(preferred) !== -1) return preferred;
+  return targets.length ? targets[0] : null;
+}
+
+// Sorties proposées pour un fichier : uniquement celles que le moteur sait produire
+// à partir de son format réellement détecté. Aucune pour un format non pris en charge.
+function getTargets(item) {
+  if (!item || item.supported === false) return [];
+  if (item.category === 'image') {
+    return IMAGE_SOURCES.indexOf(item.format) !== -1 ? IMAGE_TARGETS : [];
+  }
+  if (item.category === 'document') {
+    const vals = Object.prototype.hasOwnProperty.call(DOCUMENT_TARGETS_BY_FORMAT, item.format)
+      ? DOCUMENT_TARGETS_BY_FORMAT[item.format] : [];
+    return vals.map(val => ({ val, name: DOCUMENT_TARGET_NAMES[val] }));
+  }
+  return [];
 }
 
 // N'applique un format cible qu'aux fichiers capables de le produire.
@@ -223,7 +256,7 @@ function applyTargetFormat(fmt, categoryFilter, sourceFormats) {
   state.queue.forEach(item => {
     if (categoryFilter && item.category !== categoryFilter) return;
     if (sourceFormats && sourceFormats.indexOf(item.format) === -1) return;
-    if (!getTargets(item.category).some(t => t.val === fmt)) return;
+    if (!getTargets(item).some(t => t.val === fmt)) return;
     item.targetFormat = fmt;
     applied++;
   });
@@ -280,7 +313,7 @@ function renderQueue() {
     itemEl.className = 'file-item' + (item.mismatch ? ' has-warning' : '');
     itemEl.id = `item-${item.id}`;
 
-    const optionsHtml = getTargetOptionsHtml(item.category, item.targetFormat);
+    const optionsHtml = getTargetOptionsHtml(item, item.targetFormat);
     const badge = (item.format || item.ext.replace('.', '') || '?');
 
     itemEl.innerHTML = `
@@ -332,9 +365,11 @@ function detectionNote(item) {
   return '';
 }
 
-function getTargetOptionsHtml(category, currentTarget) {
-  return getTargets(category)
-    .map(o => `<option value="${o.val}" ${o.val === currentTarget ? 'selected' : ''}>${o.name}</option>`)
+function getTargetOptionsHtml(item, currentTarget) {
+  const targets = getTargets(item);
+  if (!targets.length) return '<option value="">Aucune sortie</option>';
+  return targets
+    .map(o => `<option value="${escapeHtml(o.val)}" ${o.val === currentTarget ? 'selected' : ''}>${escapeHtml(o.name)}</option>`)
     .join('');
 }
 

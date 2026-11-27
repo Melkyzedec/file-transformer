@@ -314,8 +314,11 @@ class ImageConverter:
 
         if ext_out == 'ico':
             max_side = min(img.size)
-            sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= max(max_side, 16)]
-            img.save(output_path, format='ICO', sizes=sizes or [(16, 16)])
+            sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= max_side]
+            # Image de moins de 16 px de côté : Pillow refuse toute taille plus
+            # grande que l'image, on garde donc sa taille réelle (plafond ICO 256).
+            img.save(output_path, format='ICO',
+                     sizes=sizes or [(min(img.width, 256), min(img.height, 256))])
         elif ext_out == 'png':
             img.save(output_path, format='PNG', optimize=True)
         elif pil_format:

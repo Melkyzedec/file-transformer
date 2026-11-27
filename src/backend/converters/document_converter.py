@@ -142,6 +142,18 @@ class DocumentConverter:
                         '.xhtml', '.txt', '.text', '.log'}
     SUPPORTED_OUTPUTS = {'pdf', 'html', 'txt', 'md', 'png', 'jpg'}
 
+    # Sorties réellement produites par chaque convertisseur ci-dessous, par
+    # format d'entrée détecté. src/frontend/app.js (DOCUMENT_TARGETS_BY_FORMAT)
+    # propose exactement ces paires : tests/test_ux_options_par_format.py les
+    # croise avec le moteur pour qu'aucune option morte ne revienne.
+    OUTPUTS_BY_SOURCE = {
+        'pdf': ('png', 'jpg', 'txt', 'md', 'html'),
+        'docx': ('pdf', 'html', 'txt', 'md'),
+        'md': ('pdf', 'html', 'txt'),
+        'html': ('pdf', 'txt'),
+        'txt': ('pdf', 'html', 'md'),
+    }
+
     # Extension -> format canonique, utilisé quand aucune détection n'est fournie.
     EXT_TO_FORMAT = {
         '.pdf': 'pdf', '.docx': 'docx',

@@ -29,7 +29,6 @@ from securite_outils import REPO_ROOT, _TempCase, _minimal_pdf  # noqa: E402
 
 import format_detector  # noqa: E402
 from converters.document_converter import DocumentConverter  # noqa: E402
-from converters.image_converter import ImageConverter  # noqa: E402
 
 NODE = shutil.which("node")
 TABLES_SCRIPT = REPO_ROOT / "tests" / "frontend-tables.cjs"
@@ -175,14 +174,38 @@ class TestZeroOptionMorte(_TempCase):
             with self.subTest(source=key):
                 self.assertEqual(targets, [], msg=f"Options proposées pour un format non pris en charge : {key}")
 
-    def test_table_du_moteur_alignee_sur_les_convertisseurs(self):
-        """La table publique du moteur reste un sous-ensemble des sorties autorisées."""
+    def test_table_du_moteur_egale_ce_que_les_convertisseurs_produisent(self):
+        """AppAPI refuse en amont les paires hors table : on vérifie donc aussi la
+        table contre DocumentConverter.convert appelé directement, sans ce filtre."""
         table = DocumentConverter.OUTPUTS_BY_SOURCE
-        self.assertEqual(set(table), {"pdf", "docx", "md", "html", "txt"})
-        for source, outputs in table.items():
-            with self.subTest(source=source):
-                self.assertTrue(set(outputs) <= DocumentConverter.SUPPORTED_OUTPUTS)
-        self.assertTrue({"png", "jpg", "jfif", "webp", "jxl", "ico", "gif", "bmp"} <= ImageConverter.SUPPORTED_OUTPUTS)
+        self.assertEqual(set(table), set(DOCUMENT_FIXTURES))
+        for fmt, factory in DOCUMENT_FIXTURES.items():
+            path, _ = self._fixture(fmt, factory)
+            produced = set()
+            for target in sorted(DocumentConverter.SUPPORTED_OUTPUTS):
+                out = self.root / f"direct_{fmt}_{target}"
+                out.mkdir()
+                try:
+                    DocumentConverter.convert(str(path), str(out / f"CANARY_TEST_sortie.{target}"),
+                                              {"source_format": fmt})
+                except Exception:
+                    continue
+                produced.add(target)
+            with self.subTest(source=fmt):
+                self.assertEqual(set(table[fmt]), produced)
+
+    def test_icone_depuis_une_image_plus_petite_que_16_pixels(self):
+        # Trouvé par le croisement : « ICO » échouait en anglais (« All sizes too large
+        # for image ») pour toute image de moins de 16 px de côté.
+        for size in ((12, 10), (1, 1), (300, 8)):
+            with self.subTest(size=size):
+                png = self.root / f"CANARY_TEST_mini_{size[0]}x{size[1]}.png"
+                with Image.new("RGB", size, (200, 40, 40)) as img:
+                    img.save(png, format="PNG")
+                res = self.convert(png, "ico")
+                self.assertTrue(res["success"], msg=res.get("error"))
+                with Image.open(res["output_path"]) as ico:
+                    self.assertLessEqual(max(ico.size), 256)
 
     def test_paire_non_proposee_refusee_avant_conversion_avec_message_clair(self):
         html_file = self.root / "CANARY_TEST_page.html"

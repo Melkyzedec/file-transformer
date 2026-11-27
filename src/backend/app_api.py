@@ -193,6 +193,18 @@ class AppAPI:
                 'error': f"Format de sortie non autorisé : {target_format}"
             }
 
+        if detection['category'] == 'document':
+            possible = DocumentConverter.OUTPUTS_BY_SOURCE.get(detection['format'], ())
+            if target_format not in possible:
+                return {
+                    'success': False,
+                    'input_path': input_path,
+                    'error': (
+                        f"La conversion {detection['label']} vers {target_format.upper()} n'est pas disponible. "
+                        f"Choisissez plutôt : {', '.join(fmt.upper() for fmt in possible)}."
+                    ),
+                }
+
         destination = Path(output_dir or os.path.dirname(input_path) or '.')
         if not destination.is_dir():
             return {'success': False, 'input_path': input_path, 'error': "Dossier de destination introuvable."}
