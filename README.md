@@ -23,7 +23,7 @@ Application Windows pour convertir des images (PNG, JPEG/JFIF, WebP, JXL, ICO, G
 ## Faire une première conversion
 
 1. Cliquez sur **Ajouter des fichiers** et choisissez l’image fictive `tests\fixtures\exemple.png`.
-2. Cliquez sur le raccourci **PNG → WebP**, puis sur **Lancer la conversion**.
+2. Cliquez sur le raccourci **PNG vers WebP**, puis sur **Lancer la conversion**.
 3. Ouvrez `tests\fixtures\exemple_converted.webp` et vérifiez que l’image contient les quatre mêmes aplats de couleur. Avec un autre dossier de destination, cherchez le résultat dans ce dossier.
 
 ## Signaler un problème ou contribuer
