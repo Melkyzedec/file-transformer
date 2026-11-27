@@ -19,8 +19,9 @@ function element() {
     innerHTML: ''
   };
 }
+const loggedErrors = [];
 const context = vm.createContext({
-  console,
+  console: Object.assign(Object.create(console), { error: (...args) => loggedErrors.push(args) }),
   document: {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, element());
@@ -185,6 +186,7 @@ const run = code => vm.runInContext(code, context);
   assert.ok(run('state.history[0].error').startsWith('Erreur inattendue'), run('state.history[0].error'));
   assert.equal(run('state.history[0].error').includes('CANARY_TEST_prive'), false, 'Chemin privé affiché');
   assert.equal(run('state.isConverting'), false);
+  assert.equal(loggedErrors.length, 1, 'Le détail technique reste dans la console de débogage');
   context.window.pywebview.api.convert_single_file = async () => null;
   await run('startBatchConversion()');
   assert.equal(run('state.queue[0].status'), 'error'); assert.ok(run('state.queue[0].error'));
