@@ -1,40 +1,75 @@
 import html
 from html.parser import HTMLParser
 import logging
+import math
 import os
 import re
 import zipfile
 
 import docx
 import markdown
+from markdown.extensions import Extension
+from markdown.treeprocessors import Treeprocessor
 import pypdfium2 as pdfium
+from PIL import Image
 from xhtml2pdf import pisa
+from xhtml2pdf.config.resources import ResourceAccessPolicy
 from xhtml2pdf.default import DEFAULT_CSS
+
+from converters.options import parse_quality
 
 logging.getLogger('xhtml2pdf').setLevel(logging.ERROR)
 
 
 class _HtmlTextExtractor(HTMLParser):
-    """Extrait le texte visible d'un document HTML en ignorant script/style/noscript."""
+    """Extrait le texte visible d'un document HTML.
 
-    _SKIP_TAGS = {'script', 'style', 'noscript'}
+    Ignore script, style, noscript, template, title, head, svg et iframe. Un
+    <head> resté ouvert (sans </head>, ce que HTML5 permet) se referme au
+    premier élément qui ne peut pas y figurer, comme le ferait un navigateur.
+    """
+
+    _SKIP_TAGS = {'script', 'style', 'noscript', 'template', 'title', 'head', 'svg', 'iframe'}
+    _HEAD_CONTENT = {'title', 'meta', 'link', 'style', 'script', 'base', 'noscript', 'template'}
     _BLOCK_TAGS = {'p', 'div', 'br', 'li', 'tr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'section', 'article', 'blockquote'}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self._skip_depth = 0
+        self._head_open = False
         self._parts = []
+
+    def _close_head(self):
+        if self._head_open:
+            self._head_open = False
+            self._skip_depth = max(0, self._skip_depth - 1)
 
     def handle_starttag(self, tag, attrs):
         t = tag.lower()
-        if t in self._SKIP_TAGS:
+        if self._head_open and t not in self._HEAD_CONTENT and self._skip_depth == 1:
+            self._close_head()
+        if t == 'head':
+            if not self._head_open:
+                self._head_open = True
+                self._skip_depth += 1
+        elif t in self._SKIP_TAGS:
             self._skip_depth += 1
         elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
             self._parts.append('\n')
 
+    def handle_startendtag(self, tag, attrs):
+        t = tag.lower()
+        if t in self._SKIP_TAGS:
+            return  # <svg/> ou <iframe/> vides : rien à ignorer
+        self.handle_starttag(tag, attrs)
+
     def handle_endtag(self, tag):
         t = tag.lower()
-        if t in self._SKIP_TAGS and self._skip_depth > 0:
+        if t == 'head':
+            self._close_head()
+        elif t in ('body', 'html'):
+            self._close_head()
+        elif t in self._SKIP_TAGS and self._skip_depth > 0:
             self._skip_depth -= 1
         elif self._skip_depth == 0 and t in self._BLOCK_TAGS:
             self._parts.append('\n')
@@ -49,6 +84,43 @@ class _HtmlTextExtractor(HTMLParser):
         return '\n'.join(line for line in lines if line)
 
 
+class _NeutralizeActiveHtml(Treeprocessor):
+    """Retire de l'arbre Markdown tout attribut capable d'exécuter du code."""
+
+    _URL_ATTRIBUTES = {'href', 'src', 'action', 'formaction', 'xlink:href', 'background', 'poster'}
+    _SAFE_DATA_IMAGES = ('data:image/png', 'data:image/jpeg', 'data:image/gif', 'data:image/webp')
+
+    def run(self, root):
+        for element in root.iter():
+            for name in list(element.attrib):
+                lowered = name.lower()
+                if lowered.startswith('on'):
+                    del element.attrib[name]
+                elif lowered in self._URL_ATTRIBUTES and not self._is_safe_url(element.tag, element.attrib[name]):
+                    del element.attrib[name]
+
+    @classmethod
+    def _is_safe_url(cls, tag, value) -> bool:
+        # Les navigateurs ignorent blancs et caractères de contrôle et décodent
+        # les entités avant de lire le schéma (« Java&#09;Script: »).
+        normalized = ''.join(ch for ch in html.unescape(value) if ch > ' ').lower()
+        if normalized.startswith(('javascript:', 'vbscript:')):
+            return False
+        if normalized.startswith('data:'):
+            return tag == 'img' and normalized.startswith(cls._SAFE_DATA_IMAGES)
+        return True
+
+
+class _SafeMarkdownExtension(Extension):
+    """Markdown sans HTML actif : le HTML brut est échappé, les URL dangereuses retirées."""
+
+    def extendMarkdown(self, md):
+        md.preprocessors.deregister('html_block', strict=False)
+        md.inlinePatterns.deregister('html', strict=False)
+        # Après attr_list (priorité 8), qui peut ajouter des attributs.
+        md.treeprocessors.register(_NeutralizeActiveHtml(md), 'neutralize_active_html', 1)
+
+
 class DocumentConverter:
     """
     Handles conversion between document formats:
@@ -60,10 +132,27 @@ class DocumentConverter:
     MAX_DOCX_UNCOMPRESSED_BYTES = 50 * 1024 * 1024
     MAX_DOCX_ENTRIES = 2000
     MAX_DOCX_COMPRESSION_RATIO = 100
+    # Export PDF -> images : plafonds vérifiés sur les dimensions déclarées
+    # des pages, avant tout rendu (un PDF de quelques octets peut déclarer une
+    # page de 14 400 pt de côté).
+    MAX_PDF_IMAGE_PAGES = 500
+    MAX_RENDER_DIMENSION = 16384
 
     SUPPORTED_INPUTS = {'.pdf', '.docx', '.md', '.markdown', '.mdown', '.html', '.htm',
                         '.xhtml', '.txt', '.text', '.log'}
     SUPPORTED_OUTPUTS = {'pdf', 'html', 'txt', 'md', 'png', 'jpg'}
+
+    # Sorties réellement produites par chaque convertisseur ci-dessous, par
+    # format d'entrée détecté. src/frontend/app.js (DOCUMENT_TARGETS_BY_FORMAT)
+    # propose exactement ces paires : tests/test_ux_options_par_format.py les
+    # croise avec le moteur pour qu'aucune option morte ne revienne.
+    OUTPUTS_BY_SOURCE = {
+        'pdf': ('png', 'jpg', 'txt', 'md', 'html'),
+        'docx': ('pdf', 'html', 'txt', 'md'),
+        'md': ('pdf', 'html', 'txt'),
+        'html': ('pdf', 'txt'),
+        'txt': ('pdf', 'html', 'md'),
+    }
 
     # Extension -> format canonique, utilisé quand aucune détection n'est fournie.
     EXT_TO_FORMAT = {
@@ -74,6 +163,10 @@ class DocumentConverter:
     }
 
     _PDF_BASE_CSS = DEFAULT_CSS + "\n@page { size: a4 portrait; margin: 36pt; }\n"
+
+    # Aucune ressource externe : ni réseau (allow_remote=False), ni fichier local
+    # (base_dir=None refuse toute lecture). Les images data: restent rendues.
+    _PDF_RESOURCE_POLICY = ResourceAccessPolicy(allow_remote=False, base_dir=None)
 
     @staticmethod
     def convert(input_path: str, output_path: str, options: dict = None) -> str:
@@ -107,17 +200,34 @@ class DocumentConverter:
 
         raise ValueError(f"Format d'entrée non supporté : {source_format or ext_in}")
 
+    # UTF-32 avant UTF-16 : le BOM UTF-32 LE commence par celui d'UTF-16 LE.
+    _UNICODE_BOMS = (
+        (b'\xff\xfe\x00\x00', 'utf-32-le'),
+        (b'\x00\x00\xfe\xff', 'utf-32-be'),
+        (b'\xef\xbb\xbf', 'utf-8'),
+        (b'\xff\xfe', 'utf-16-le'),
+        (b'\xfe\xff', 'utf-16-be'),
+    )
+
     @staticmethod
     def _read_text(input_path: str) -> str:
-        """Lit un fichier texte en tolérant les encodages hérités (cp1252, latin-1)."""
-        for encoding in ('utf-8-sig', 'cp1252', 'latin-1'):
-            try:
-                with open(input_path, 'r', encoding=encoding) as f:
-                    return f.read()
-            except UnicodeDecodeError:
-                continue
-        with open(input_path, 'r', encoding='utf-8', errors='replace') as f:
-            return f.read()
+        """Lit un fichier texte : BOM Unicode (UTF-8/16/32), sinon UTF-8, cp1252, latin-1."""
+        with open(input_path, 'rb') as f:
+            raw = f.read()
+        text = None
+        for bom, encoding in DocumentConverter._UNICODE_BOMS:
+            if raw.startswith(bom):
+                text = raw[len(bom):].decode(encoding, errors='replace')
+                break
+        if text is None:
+            for encoding in ('utf-8', 'cp1252', 'latin-1'):
+                try:
+                    text = raw.decode(encoding)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        # Mêmes fins de ligne qu'une lecture en mode texte.
+        return text.replace('\r\n', '\n').replace('\r', '\n')
 
     @staticmethod
     def _save_pdf_page_image(page, dest_path: str, ext_out: str, scale: float, quality: int) -> None:
@@ -130,7 +240,6 @@ class DocumentConverter:
         try:
             if ext_out in ('jpg', 'jpeg'):
                 if img.mode in ('RGBA', 'LA', 'P'):
-                    from PIL import Image
                     if img.mode == 'P':
                         img = img.convert('RGBA')
                     background = Image.new('RGB', img.size, (255, 255, 255))
@@ -153,6 +262,51 @@ class DocumentConverter:
             textpage.close()
 
     @staticmethod
+    def _check_pdf_render_size(doc, page_count: int, scale: float, dpi: int) -> None:
+        """Refuse un export trop lourd avant d'allouer la moindre image."""
+        if page_count > DocumentConverter.MAX_PDF_IMAGE_PAGES:
+            raise ValueError(
+                f"Le PDF compte {page_count} pages : l'export en images est limité à "
+                f"{DocumentConverter.MAX_PDF_IMAGE_PAGES} pages."
+            )
+        max_side = DocumentConverter.MAX_RENDER_DIMENSION
+        max_pixels = 2 * Image.MAX_IMAGE_PIXELS if Image.MAX_IMAGE_PIXELS else None
+        for index in range(page_count):
+            width_pt, height_pt = doc.get_page_size(index)
+            width = math.ceil(width_pt * scale)
+            height = math.ceil(height_pt * scale)
+            if width > max_side or height > max_side or (max_pixels and width * height > max_pixels):
+                raise ValueError(
+                    f"La page {index + 1} ferait {width} x {height} pixels à {dpi} DPI : plafond de "
+                    f"{max_side} pixels de côté et {max_pixels} pixels au total. Réduisez le DPI."
+                )
+
+    @staticmethod
+    def _render_pdf_pages(doc, page_count: int, output_path: str, ext_out: str,
+                          scale: float, quality: int) -> str:
+        out_dir = os.path.dirname(output_path)
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+
+        if page_count == 1:
+            page = doc[0]
+            try:
+                DocumentConverter._save_pdf_page_image(page, output_path, ext_out, scale, quality)
+            finally:
+                page.close()
+            return output_path
+
+        created_files = []
+        for i in range(page_count):
+            page = doc[i]
+            try:
+                p_path = os.path.join(out_dir, f"{base_name}_page_{i+1}.{ext_out}")
+                DocumentConverter._save_pdf_page_image(page, p_path, ext_out, scale, quality)
+                created_files.append(p_path)
+            finally:
+                page.close()
+        return created_files[0] if created_files else output_path
+
+    @staticmethod
     def _convert_pdf(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         doc = pdfium.PdfDocument(input_path)
         try:
@@ -168,29 +322,16 @@ class DocumentConverter:
                 if dpi < DocumentConverter.MIN_DPI or dpi > DocumentConverter.MAX_DPI:
                     raise ValueError(f"Le DPI doit être compris entre {DocumentConverter.MIN_DPI} et {DocumentConverter.MAX_DPI}.")
                 scale = dpi / 72
-                quality = int(options.get('quality', 90))
-
-                out_dir = os.path.dirname(output_path)
-                base_name = os.path.splitext(os.path.basename(output_path))[0]
-
-                if page_count == 1:
-                    page = doc[0]
-                    try:
-                        DocumentConverter._save_pdf_page_image(page, output_path, ext_out, scale, quality)
-                    finally:
-                        page.close()
-                    return output_path
-
-                created_files = []
-                for i in range(page_count):
-                    page = doc[i]
-                    try:
-                        p_path = os.path.join(out_dir, f"{base_name}_page_{i+1}.{ext_out}")
-                        DocumentConverter._save_pdf_page_image(page, p_path, ext_out, scale, quality)
-                        created_files.append(p_path)
-                    finally:
-                        page.close()
-                return created_files[0] if created_files else output_path
+                quality = parse_quality(options)
+                DocumentConverter._check_pdf_render_size(doc, page_count, scale, dpi)
+                try:
+                    return DocumentConverter._render_pdf_pages(
+                        doc, page_count, output_path, ext_out, scale, quality
+                    )
+                except MemoryError as exc:
+                    raise MemoryError(
+                        "Mémoire insuffisante pour rendre le PDF en images. Réduisez le DPI."
+                    ) from exc
 
             elif ext_out in ('txt', 'md'):
                 full_text = []
@@ -258,7 +399,8 @@ class DocumentConverter:
     @staticmethod
     def _convert_docx(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         DocumentConverter._validate_docx_archive(input_path)
-        doc = docx.Document(input_path)
+        with open(input_path, 'rb') as docx_file:
+            doc = docx.Document(docx_file)
         paragraphs = [p.text for p in doc.paragraphs]
         tables = [
             [[cell.text.strip() for cell in row.cells] for row in table.rows]
@@ -301,7 +443,10 @@ class DocumentConverter:
     def _convert_markdown(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         md_content = DocumentConverter._read_text(input_path)
 
-        html_body = markdown.markdown(md_content, extensions=['extra', 'codehilite', 'tables', 'toc'])
+        html_body = markdown.markdown(
+            md_content,
+            extensions=['extra', 'codehilite', 'tables', 'toc', _SafeMarkdownExtension()],
+        )
         full_html = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -373,7 +518,11 @@ th {{ background-color: #f2f2f2; }}
 
     @staticmethod
     def _block_external_resource(uri: str, rel: str) -> str:
-        """Bloque le chargement de ressources réseau ou locales externes depuis du HTML."""
+        """Point d'observation des ressources demandées par le HTML.
+
+        Une valeur vide laisse l'URI d'origine à xhtml2pdf : le blocage effectif
+        est assuré par _PDF_RESOURCE_POLICY, pas par ce rappel.
+        """
         return ''
 
     @staticmethod
@@ -403,6 +552,7 @@ th {{ background-color: #f2f2f2; }}
                 encoding='utf-8',
                 default_css=DocumentConverter._PDF_BASE_CSS,
                 link_callback=DocumentConverter._block_external_resource,
+                resource_policy=DocumentConverter._PDF_RESOURCE_POLICY,
             )
         if status.err or not os.path.isfile(output_path) or os.path.getsize(output_path) == 0:
             raise RuntimeError(f"Échec de la génération PDF ({status.err} erreur(s)).")

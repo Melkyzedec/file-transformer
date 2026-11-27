@@ -1,14 +1,137 @@
 import gzip
 import io
 import os
+import xml.etree.ElementTree as ET
 from PIL import Image
 import resvg_py
+
+from converters.options import parse_keep_aspect_ratio, parse_quality
 
 try:
     import pillow_heif
     pillow_heif.register_heif_opener()
 except Exception:
     pass
+
+def _extract_jxl_codestream(data: bytes) -> bytes:
+    """Extrait le flux brut JPEG XL (depuis un flux nu ou un conteneur ISOBMFF)."""
+    if data.startswith(b'\xff\x0a'):
+        return data[2:]
+    if not data.startswith(b'\x00\x00\x00\x0cJXL \r\n\x87\n'):
+        raise ValueError("Signature JPEG XL invalide.")
+    pos = 12
+    length = len(data)
+    parts: list[bytes] = []
+    while pos + 8 <= length:
+        size = int.from_bytes(data[pos:pos + 4], 'big')
+        btype = data[pos + 4:pos + 8]
+        header = 8
+        if size == 1:
+            if pos + 16 > length:
+                raise ValueError("Boîte JPEG XL tronquée.")
+            size = int.from_bytes(data[pos + 8:pos + 16], 'big')
+            header = 16
+        elif size == 0:
+            size = length - pos
+        if size < header or pos + size > length:
+            raise ValueError("Boîte JPEG XL invalide.")
+        payload = data[pos + header:pos + size]
+        if btype == b'jxlc':
+            if not payload.startswith(b'\xff\x0a'):
+                raise ValueError("Flux JPEG XL invalide dans jxlc.")
+            return payload[2:]
+        if btype == b'jxlp':
+            if len(payload) < 4:
+                raise ValueError("Boîte jxlp tronquée.")
+            parts.append(payload[4:])
+            if len(b''.join(parts)) >= 32:
+                break
+        pos += size
+    merged = b''.join(parts)
+    if merged.startswith(b'\xff\x0a'):
+        return merged[2:]
+    raise ValueError("Flux JPEG XL introuvable dans le conteneur.")
+
+
+def _parse_jxl_size_header(data: bytes) -> tuple[int, int]:
+    """Lit (largeur, hauteur) depuis l'en-tête SizeHeader ISO/IEC 18181-1 sans décoder l'image."""
+    stream = _extract_jxl_codestream(data)
+    bit_pos = 0
+    total_bits = len(stream) * 8
+
+    def read_bits(count: int) -> int:
+        nonlocal bit_pos
+        if bit_pos + count > total_bits:
+            raise ValueError("En-tête JPEG XL tronqué.")
+        val = 0
+        for i in range(count):
+            byte_val = stream[(bit_pos + i) >> 3]
+            if (byte_val >> ((bit_pos + i) & 7)) & 1:
+                val |= 1 << i
+        bit_pos += count
+        return val
+
+    def read_u32(bits_table: tuple[int, int, int, int]) -> int:
+        return read_bits(bits_table[read_bits(2)])
+
+    small = read_bits(1)
+    if small:
+        height = (1 + read_bits(5)) * 8
+    else:
+        height = 1 + read_u32((9, 13, 18, 30))
+
+    ratio = read_bits(3)
+    if ratio == 0:
+        if small:
+            width = (1 + read_bits(5)) * 8
+        else:
+            width = 1 + read_u32((9, 13, 18, 30))
+    else:
+        ratios = ((1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1))
+        num, den = ratios[ratio - 1]
+        width = (height * num) // den
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Dimensions JPEG XL invalides.")
+    return width, height
+
+
+def _check_jxl_dimensions(data: bytes) -> None:
+    """Refuse un JPEG XL trop grand en lisant son en-tête, avant tout décodage.
+
+    Le décodeur imagecodecs alloue l'image entière : le contrôle anti-bombe de
+    Pillow, appliqué après coup, ne protège pas ce format. Même plafond que
+    Pillow pour les autres formats (2 x Image.MAX_IMAGE_PIXELS).
+    """
+    import imagecodecs
+    jpegxl_info = getattr(imagecodecs, 'jpegxl_info', None)
+    frames = 1
+    if callable(jpegxl_info):
+        try:
+            info = jpegxl_info(data)
+        except Exception as exc:
+            raise ValueError("En-tête JPEG XL illisible.") from exc
+        shape = tuple(info.get('shape') or ())
+        frames = max(1, int(info.get('frames') or 1))
+        if frames > 1 and len(shape) >= 3 and shape[0] == frames:
+            height, width = shape[1], shape[2]
+        elif len(shape) >= 2:
+            height, width = shape[0], shape[1]
+        else:
+            raise ValueError("En-tête JPEG XL illisible.")
+    else:
+        try:
+            width, height = _parse_jxl_size_header(data)
+        except Exception as exc:
+            raise ValueError("En-tête JPEG XL illisible.") from exc
+    pixels = int(width) * int(height) * frames
+    limit = Image.MAX_IMAGE_PIXELS
+    if limit and pixels > 2 * limit:
+        raise Image.DecompressionBombError(
+            f"Image JPEG XL trop grande ({width} x {height} pixels, {frames} image(s)) : "
+            f"plafond de {2 * limit} pixels dépassé."
+        )
+
 
 try:
     from PIL import ImageFile
@@ -21,6 +144,7 @@ try:
 
         def _open(self):
             data = self.fp.read()
+            _check_jxl_dimensions(data)
             arr = imagecodecs.jpegxl_decode(data)
             if arr.dtype == np.uint16:
                 arr = (arr / 256).astype(np.uint8)
@@ -39,6 +163,12 @@ try:
     Image.register_mime('JXL', 'image/jxl')
 except Exception:
     pass
+
+
+_SVG_NAMESPACE = 'http://www.w3.org/2000/svg'
+_XLINK_NAMESPACE = 'http://www.w3.org/1999/xlink'
+ET.register_namespace('', _SVG_NAMESPACE)
+ET.register_namespace('xlink', _XLINK_NAMESPACE)
 
 
 class ImageConverter:
@@ -95,6 +225,8 @@ class ImageConverter:
             options = {}
 
         ext_out = os.path.splitext(output_path)[1].lower().replace('.', '')
+        parse_quality(options)
+        parse_keep_aspect_ratio(options)
 
         if ImageConverter._is_svg_source(input_path, options):
             return ImageConverter._convert_svg(input_path, output_path, options)
@@ -136,7 +268,7 @@ class ImageConverter:
     def _resize_image(img: Image.Image, options: dict) -> Image.Image:
         width = options.get('width')
         height = options.get('height')
-        keep_aspect = options.get('keep_aspect_ratio', True)
+        keep_aspect = parse_keep_aspect_ratio(options)
 
         if width is not None or height is not None:
             orig_w, orig_h = img.size
@@ -169,11 +301,12 @@ class ImageConverter:
             source_format = (options or {}).get('source_format')
             ext = os.path.splitext(input_path)[1].lower()
             if source_format == 'jxl' or ext == '.jxl':
+                with open(input_path, 'rb') as f:
+                    data = f.read()
+                _check_jxl_dimensions(data)
                 try:
                     import imagecodecs
                     import numpy as np
-                    with open(input_path, 'rb') as f:
-                        data = f.read()
                     arr = imagecodecs.jpegxl_decode(data)
                     if arr.dtype == np.uint16:
                         arr = (arr / 256).astype(np.uint8)
@@ -225,13 +358,35 @@ class ImageConverter:
         return raw.decode('utf-8', errors='replace')
 
     @staticmethod
+    def _strip_external_svg_references(svg_text: str) -> str:
+        """Retire tout href qui n'est ni interne (#id) ni intégré (data:).
+
+        resvg lit sinon les fichiers locaux désignés par <image href="...">.
+        Le document est analysé (entités internes développées, entités externes
+        non chargées) puis resérialisé : aucune référence ne peut se cacher dans
+        une entité.
+        """
+        try:
+            root = ET.fromstring(svg_text)
+        except ET.ParseError as exc:
+            raise ValueError(f"SVG invalide : {exc}") from exc
+        for element in root.iter():
+            for name in list(element.attrib):
+                if name.rsplit('}', 1)[-1] != 'href':
+                    continue
+                value = element.attrib[name].strip()
+                if not (value.startswith('#') or value[:5].lower() == 'data:'):
+                    del element.attrib[name]
+        return ET.tostring(root, encoding='unicode')
+
+    @staticmethod
     def _save(img: Image.Image, output_path: str, ext_out: str, options: dict) -> None:
         """Enregistre l'image dans le format demandé avec les bonnes options."""
         if ext_out == 'jxl':
             try:
                 import imagecodecs
                 import numpy as np
-                quality = int(options.get('quality', 90))
+                quality = parse_quality(options)
                 arr = np.array(img)
                 data = imagecodecs.jpegxl_encode(arr, level=quality)
                 with open(output_path, 'wb') as f:
@@ -244,14 +399,17 @@ class ImageConverter:
         save_args = {}
 
         if ext_out in ImageConverter.LOSSY_OUTPUTS:
-            save_args['quality'] = int(options.get('quality', 90))
+            save_args['quality'] = parse_quality(options)
             if ext_out in ImageConverter.JPEG_OUTPUTS:
                 save_args['progressive'] = True
 
         if ext_out == 'ico':
             max_side = min(img.size)
-            sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= max(max_side, 16)]
-            img.save(output_path, format='ICO', sizes=sizes or [(16, 16)])
+            sizes = [(s, s) for s in (16, 32, 48, 64, 128, 256) if s <= max_side]
+            # Image de moins de 16 px de côté : Pillow refuse toute taille plus
+            # grande que l'image, on garde donc sa taille réelle (plafond ICO 256).
+            img.save(output_path, format='ICO',
+                     sizes=sizes or [(min(img.width, 256), min(img.height, 256))])
         elif ext_out == 'png':
             img.save(output_path, format='PNG', optimize=True)
         elif pil_format:
@@ -271,7 +429,9 @@ class ImageConverter:
         zoom = dpi / 72
 
         try:
-            svg_text = ImageConverter._read_svg_text(input_path)
+            svg_text = ImageConverter._strip_external_svg_references(
+                ImageConverter._read_svg_text(input_path)
+            )
             png_bytes = resvg_py.svg_to_bytes(svg_string=svg_text, zoom=zoom)
             with Image.open(io.BytesIO(png_bytes)) as img:
                 img = ImageConverter._resize_image(img, options)

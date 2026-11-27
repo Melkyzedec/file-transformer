@@ -25,13 +25,9 @@
           <span class="subtitle">Images & documents</span>
         </div>
       </div>
-      <div class="header-actions">
-        <span class="badge-tag">APPLICATION DESKTOP</span>
-      </div>
     </header>
 
     <!-- Main Workspace -->
-    <div class="workspace-heading"><div><p class="eyebrow">VOTRE ATELIER DE CONVERSION</p><h2>Un autre format.<br><span>Les mêmes idées.</span></h2></div><p>Ajoutez vos fichiers.<br>Choisissez leur prochaine forme.</p></div>
     <main class="app-workspace" id="workspace" tabindex="-1">
       
       <!-- Drag & Drop Zone -->
@@ -45,7 +41,7 @@
             </svg>
           </div>
           <div class="dropzone-text">
-            <h3>Déposez vos fichiers</h3>
+            <h2>Déposez vos fichiers</h2>
             <p>Images (PNG, JPG, HEIC, JXL, WebP, SVG, ICO, GIF, BMP, TIFF) et Documents (PDF, DOCX, MD, HTML, TXT)</p>
             <p class="dropzone-hint">Le format réel est détecté automatiquement à partir du contenu, même si l'extension est fausse ou absente.</p>
           </div>
@@ -68,6 +64,7 @@
             <button class="btn-text" id="btn-clear-queue" title="Vider la liste">Vider la liste</button>
           </div>
           
+          <p class="status-notice" id="status-notice" role="status" aria-live="polite" hidden></p>
           <div class="file-queue-container" id="file-queue">
             <div class="empty-state" id="empty-state">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
@@ -82,20 +79,20 @@
         <!-- Right Column: Settings & Presets -->
         <section class="card settings-card">
           <div class="card-header">
-            <h2><span class="step-number">02</span> Préparer la sortie</h2>
+            <h2>Préparer la sortie</h2>
           </div>
 
           <!-- Quick Presets -->
           <div class="settings-group">
             <label class="group-label">Raccourcis de conversion</label>
             <div class="preset-chips">
-              <button class="chip" data-preset="png-webp">PNG ➔ WebP</button>
-              <button class="chip" data-preset="jpg-png">JPG ➔ PNG</button>
-              <button class="chip" data-preset="jxl-png">JXL ➔ PNG</button>
-              <button class="chip" data-preset="img-ico">Image ➔ ICO</button>
-              <button class="chip" data-preset="pdf-png">PDF ➔ PNG</button>
-              <button class="chip" data-preset="md-pdf">Markdown ➔ PDF</button>
-              <button class="chip" data-preset="docx-pdf">DOCX ➔ PDF</button>
+              <button class="chip" data-preset="png-webp">PNG vers WebP</button>
+              <button class="chip" data-preset="jpg-png">JPG vers PNG</button>
+              <button class="chip" data-preset="jxl-png">JXL vers PNG</button>
+              <button class="chip" data-preset="img-ico">Image vers ICO</button>
+              <button class="chip" data-preset="pdf-png">PDF vers PNG</button>
+              <button class="chip" data-preset="md-pdf">Markdown vers PDF</button>
+              <button class="chip" data-preset="docx-pdf">DOCX vers PDF</button>
             </div>
           </div>
 
@@ -175,13 +172,14 @@
                   <label for="opt-dpi">Résolution PDF (DPI)</label>
                   <span id="opt-dpi-val">150 DPI</span>
                 </div>
-                <input type="range" id="opt-dpi" min="72" max="300" step="26" value="150" class="form-range">
+                <input type="range" id="opt-dpi" min="75" max="300" step="25" value="150" class="form-range">
               </div>
             </div>
           </details>
 
           <!-- Launch Button -->
-          <div class="launch-action"><p class="launch-note" id="queue-summary" aria-live="polite">Ajoutez des fichiers pour commencer.</p>
+          <div class="launch-action">
+            <p class="launch-note" id="queue-summary" aria-live="polite">Ajoutez des fichiers pour commencer.</p>
             <button class="btn btn-accent btn-large" id="btn-convert-all" disabled>
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
               Lancer la conversion

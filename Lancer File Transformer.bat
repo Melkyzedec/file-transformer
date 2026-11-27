@@ -22,7 +22,7 @@ if errorlevel 1 goto :venv_creation_failed
 
 :check_venv
 if not exist "%VENV_PYTHON%" goto :broken_venv
-"%VENV_PYTHON%" -c "import sys; raise SystemExit(sys.version_info < (3, 10))" >nul 2>&1
+"%VENV_PYTHON%" -c "import sys; raise SystemExit(sys.version_info < (3, 12))" >nul 2>&1
 if errorlevel 1 goto :broken_venv
 
 "%VENV_PYTHON%" -c "import webview, PIL, pypdfium2, xhtml2pdf, resvg_py, docx, markdown, reportlab, pillow_heif, imagecodecs, numpy" >nul 2>&1
@@ -60,7 +60,7 @@ call :probe "%~1"
 exit /b %errorlevel%
 
 :probe
-"%~1" %~2 -c "import sys; raise SystemExit(sys.version_info < (3, 10))" >nul 2>&1
+"%~1" %~2 -c "import sys; raise SystemExit(sys.version_info < (3, 12))" >nul 2>&1
 if errorlevel 1 exit /b 1
 set "BOOTSTRAP=%~1"
 set "BOOTSTRAP_ARGS=%~2"
@@ -71,7 +71,7 @@ echo [ERREUR] Dossier incomplet. Utilisez Extraire tout, puis ouvrez le dossier 
 goto :failed
 
 :missing_python
-echo [ERREUR] Python 3.10 ou plus recent est requis. Installez Python 3.14 x64 pour votre compte, puis relancez ce fichier.
+echo [ERREUR] Python 3.12 ou plus recent est requis. Installez Python 3.14 x64 pour votre compte, puis relancez ce fichier.
 echo https://www.python.org/downloads/windows/
 goto :failed
 
