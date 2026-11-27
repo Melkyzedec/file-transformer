@@ -13,6 +13,89 @@ try:
 except Exception:
     pass
 
+def _extract_jxl_codestream(data: bytes) -> bytes:
+    """Extrait le flux brut JPEG XL (depuis un flux nu ou un conteneur ISOBMFF)."""
+    if data.startswith(b'\xff\x0a'):
+        return data[2:]
+    if not data.startswith(b'\x00\x00\x00\x0cJXL \r\n\x87\n'):
+        raise ValueError("Signature JPEG XL invalide.")
+    pos = 12
+    length = len(data)
+    parts: list[bytes] = []
+    while pos + 8 <= length:
+        size = int.from_bytes(data[pos:pos + 4], 'big')
+        btype = data[pos + 4:pos + 8]
+        header = 8
+        if size == 1:
+            if pos + 16 > length:
+                raise ValueError("Boîte JPEG XL tronquée.")
+            size = int.from_bytes(data[pos + 8:pos + 16], 'big')
+            header = 16
+        elif size == 0:
+            size = length - pos
+        if size < header or pos + size > length:
+            raise ValueError("Boîte JPEG XL invalide.")
+        payload = data[pos + header:pos + size]
+        if btype == b'jxlc':
+            if not payload.startswith(b'\xff\x0a'):
+                raise ValueError("Flux JPEG XL invalide dans jxlc.")
+            return payload[2:]
+        if btype == b'jxlp':
+            if len(payload) < 4:
+                raise ValueError("Boîte jxlp tronquée.")
+            parts.append(payload[4:])
+            if len(b''.join(parts)) >= 32:
+                break
+        pos += size
+    merged = b''.join(parts)
+    if merged.startswith(b'\xff\x0a'):
+        return merged[2:]
+    raise ValueError("Flux JPEG XL introuvable dans le conteneur.")
+
+
+def _parse_jxl_size_header(data: bytes) -> tuple[int, int]:
+    """Lit (largeur, hauteur) depuis l'en-tête SizeHeader ISO/IEC 18181-1 sans décoder l'image."""
+    stream = _extract_jxl_codestream(data)
+    bit_pos = 0
+    total_bits = len(stream) * 8
+
+    def read_bits(count: int) -> int:
+        nonlocal bit_pos
+        if bit_pos + count > total_bits:
+            raise ValueError("En-tête JPEG XL tronqué.")
+        val = 0
+        for i in range(count):
+            byte_val = stream[(bit_pos + i) >> 3]
+            if (byte_val >> ((bit_pos + i) & 7)) & 1:
+                val |= 1 << i
+        bit_pos += count
+        return val
+
+    def read_u32(bits_table: tuple[int, int, int, int]) -> int:
+        return read_bits(bits_table[read_bits(2)])
+
+    small = read_bits(1)
+    if small:
+        height = (1 + read_bits(5)) * 8
+    else:
+        height = 1 + read_u32((9, 13, 18, 30))
+
+    ratio = read_bits(3)
+    if ratio == 0:
+        if small:
+            width = (1 + read_bits(5)) * 8
+        else:
+            width = 1 + read_u32((9, 13, 18, 30))
+    else:
+        ratios = ((1, 1), (12, 10), (4, 3), (3, 2), (16, 9), (5, 4), (2, 1))
+        num, den = ratios[ratio - 1]
+        width = (height * num) // den
+
+    if width <= 0 or height <= 0:
+        raise ValueError("Dimensions JPEG XL invalides.")
+    return width, height
+
+
 def _check_jxl_dimensions(data: bytes) -> None:
     """Refuse un JPEG XL trop grand en lisant son en-tête, avant tout décodage.
 
@@ -21,18 +104,26 @@ def _check_jxl_dimensions(data: bytes) -> None:
     Pillow pour les autres formats (2 x Image.MAX_IMAGE_PIXELS).
     """
     import imagecodecs
-    try:
-        info = imagecodecs.jpegxl_info(data)
-    except Exception as exc:
-        raise ValueError("En-tête JPEG XL illisible.") from exc
-    shape = tuple(info.get('shape') or ())
-    frames = max(1, int(info.get('frames') or 1))
-    if frames > 1 and len(shape) >= 3 and shape[0] == frames:
-        height, width = shape[1], shape[2]
-    elif len(shape) >= 2:
-        height, width = shape[0], shape[1]
+    jpegxl_info = getattr(imagecodecs, 'jpegxl_info', None)
+    frames = 1
+    if callable(jpegxl_info):
+        try:
+            info = jpegxl_info(data)
+        except Exception as exc:
+            raise ValueError("En-tête JPEG XL illisible.") from exc
+        shape = tuple(info.get('shape') or ())
+        frames = max(1, int(info.get('frames') or 1))
+        if frames > 1 and len(shape) >= 3 and shape[0] == frames:
+            height, width = shape[1], shape[2]
+        elif len(shape) >= 2:
+            height, width = shape[0], shape[1]
+        else:
+            raise ValueError("En-tête JPEG XL illisible.")
     else:
-        raise ValueError("En-tête JPEG XL illisible.")
+        try:
+            width, height = _parse_jxl_size_header(data)
+        except Exception as exc:
+            raise ValueError("En-tête JPEG XL illisible.") from exc
     pixels = int(width) * int(height) * frames
     limit = Image.MAX_IMAGE_PIXELS
     if limit and pixels > 2 * limit:

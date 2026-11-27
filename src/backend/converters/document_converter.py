@@ -399,7 +399,8 @@ class DocumentConverter:
     @staticmethod
     def _convert_docx(input_path: str, output_path: str, ext_out: str, options: dict) -> str:
         DocumentConverter._validate_docx_archive(input_path)
-        doc = docx.Document(input_path)
+        with open(input_path, 'rb') as docx_file:
+            doc = docx.Document(docx_file)
         paragraphs = [p.text for p in doc.paragraphs]
         tables = [
             [[cell.text.strip() for cell in row.cells] for row in table.rows]

@@ -26,10 +26,11 @@ class TestM1ExplorerPortable(unittest.TestCase):
     """La résolution d'explorer.exe se teste sur toute plateforme."""
 
     def test_explorer_is_resolved_from_systemroot_as_absolute_path(self):
-        with mock.patch.dict(os.environ, {"SystemRoot": os.path.join(os.sep, "CANARY_TEST_Windows")}):
+        fake_root = os.path.abspath(os.path.join(os.sep, "CANARY_TEST_Windows"))
+        with mock.patch.dict(os.environ, {"SystemRoot": fake_root}):
             with mock.patch("app_api.os.path.isfile", return_value=True) as isfile:
                 resolved = AppAPI._resolve_explorer_executable()
-        expected = os.path.normpath(os.path.join(os.sep, "CANARY_TEST_Windows", "explorer.exe"))
+        expected = os.path.normpath(os.path.join(fake_root, "explorer.exe"))
         self.assertEqual(resolved, expected)
         self.assertTrue(os.path.isabs(resolved))
         isfile.assert_called_once_with(expected)

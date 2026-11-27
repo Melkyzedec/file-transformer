@@ -97,7 +97,7 @@ class TestM8EncodagesUnicode(_TempCase):
                 html_text = Path(res["output_path"]).read_text(encoding="utf-8")
                 self.assertIn("CANARY_TEST_é ünïcödé € 中文 contact@example.test\nligne 2", html_text)
                 self.assertNotIn("\x00", html_text)
-                self.assertNotIn("﻿", html_text)
+                self.assertNotIn("\ufeff", html_text)
 
     def test_utf16_markdown_is_rendered(self):
         path = self.root / "CANARY_TEST_notes.md"
