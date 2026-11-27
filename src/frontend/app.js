@@ -3,7 +3,9 @@ const state = {
   queue: [], // { id, path, name, ext, size, category, format, formatLabel, mismatch, supported, targetFormat, status, duration, error }
   history: [],
   outputFolder: null,
-  isConverting: false
+  isConverting: false,
+  progress: null, // { current, total } pendant une conversion
+  notice: null // { text, tone } : retour visible de la dernière action
 };
 
 // Formats de sortie proposés par catégorie
@@ -66,6 +68,10 @@ const btnConvertAll = document.getElementById('btn-convert-all');
 const historyListEl = document.getElementById('history-list');
 const emptyHistoryEl = document.getElementById('empty-history');
 const btnClearHistory = document.getElementById('btn-clear-history');
+const statusNoticeEl = document.getElementById('status-notice');
+
+const BRIDGE_MISSING = "Aperçu navigateur : l'ajout et la conversion de fichiers fonctionnent seulement dans l'application. Ouvrez File Transformer depuis son lanceur.";
+const UNEXPECTED_ERROR = "Erreur inattendue de l'application pendant la conversion. Réessayez ; si le problème continue, relancez File Transformer.";
 
 // Wait for PyWebView API or initialization
 document.addEventListener('DOMContentLoaded', () => {
@@ -75,12 +81,70 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Appelé depuis Python lors d'un glisser-déposer : les fichiers ont déjà été
 // analysés côté backend (chemin réel + format détecté par signature).
-window.onNativeFilesDropped = function (files) {
+// Accepte la liste seule (ancien format) ou { files, ignored }.
+window.onNativeFilesDropped = function (payload) {
   dropzone.classList.remove('dragover');
-  if (files && files.length > 0) {
-    addFilesToQueue(files);
-  }
+  receiveFiles(payload);
 };
+
+// Retour visible de la dernière action (zone d'état, lue par les lecteurs d'écran).
+function showNotice(text, tone = 'info') {
+  state.notice = text ? { text: String(text), tone } : null;
+  renderNotice();
+}
+
+function renderNotice() {
+  const notice = state.notice;
+  statusNoticeEl.textContent = notice ? notice.text : '';
+  statusNoticeEl.hidden = !notice;
+  statusNoticeEl.className = 'status-notice' + (notice && notice.tone === 'error' ? ' is-error' : '');
+}
+
+function plural(count, singular, pluralForm) {
+  return `${count} ${count > 1 ? (pluralForm || singular + 's') : singular}`;
+}
+
+const IGNORED_REASONS = {
+  folder: 'les dossiers ne sont pas pris en charge',
+  shortcut: 'les raccourcis ne sont pas pris en charge',
+  reserved: 'nom réservé par Windows',
+  missing: 'fichier introuvable',
+  invalid: "ce n'est pas un fichier lisible"
+};
+
+function describeIgnored(ignored) {
+  const groups = [];
+  ignored.forEach(entry => {
+    const reason = Object.prototype.hasOwnProperty.call(IGNORED_REASONS, entry && entry.reason)
+      ? IGNORED_REASONS[entry.reason] : IGNORED_REASONS.invalid;
+    let group = groups.find(g => g.reason === reason);
+    if (!group) { group = { reason, names: [] }; groups.push(group); }
+    group.names.push(String((entry && entry.name) || 'sans nom'));
+  });
+  const names = list => list.length > 3 ? `${list.slice(0, 3).join(', ')}…` : list.join(', ');
+  const head = plural(ignored.length, 'élément ignoré', 'éléments ignorés');
+  if (groups.length === 1) return `${head} (${names(groups[0].names)}) : ${groups[0].reason}.`;
+  return `${head} : ${groups.map(g => `${names(g.names)} (${g.reason})`).join(' ; ')}.`;
+}
+
+// Point d'entrée commun du sélecteur et du glisser-déposer.
+function receiveFiles(payload) {
+  const files = Array.isArray(payload) ? payload : ((payload && payload.files) || []);
+  const ignored = Array.isArray(payload) ? [] : ((payload && payload.ignored) || []);
+  const { duplicates } = addFilesToQueue(files);
+  const parts = [];
+  if (ignored.length) parts.push(describeIgnored(ignored));
+  if (duplicates) parts.push(`${plural(duplicates, 'fichier')} déjà dans la liste.`);
+  showNotice(parts.join(' '), ignored.length ? 'error' : 'info');
+}
+
+async function selectFilesFromDialog() {
+  if (!(window.pywebview && window.pywebview.api)) {
+    showNotice(BRIDGE_MISSING, 'error');
+    return;
+  }
+  receiveFiles(await window.pywebview.api.select_files());
+}
 
 function initEventListeners() {
   // Range sliders live value update
@@ -92,15 +156,11 @@ function initEventListeners() {
   });
 
   // Browse files
-  btnSelectFiles.addEventListener('click', async () => {
-    if (window.pywebview && window.pywebview.api) {
-      const files = await window.pywebview.api.select_files();
-      if (files && files.length > 0) {
-        addFilesToQueue(files);
-      }
-    } else {
-      alert("Mode prévisualisation web : PyWebView non connecté.");
-    }
+  btnSelectFiles.addEventListener('click', () => {
+    selectFilesFromDialog().catch(err => {
+      console.error(err);
+      showNotice("Impossible d'ouvrir la fenêtre de choix des fichiers. Réessayez.", 'error');
+    });
   });
 
   // Drag & Drop : le retour visuel est géré ici, les chemins réels des fichiers
@@ -131,6 +191,7 @@ function initEventListeners() {
   btnClearQueue.addEventListener('click', () => {
     if (state.isConverting) return;
     state.queue = [];
+    showNotice(null);
     renderQueue();
   });
 
@@ -138,7 +199,7 @@ function initEventListeners() {
   globalFormatSelect.addEventListener('change', (e) => {
     const fmt = e.target.value;
     if (!fmt) return;
-    applyTargetFormat(fmt, null);
+    applyGlobalFormat(fmt);
   });
 
   // Presets click
@@ -178,9 +239,14 @@ function preventDefaults(e) {
 }
 
 function addFilesToQueue(files) {
-  files.forEach(f => {
+  let added = 0;
+  let duplicates = 0;
+  (files || []).forEach(f => {
     // Avoid exact duplicates
-    if (!state.queue.some(item => item.path === f.path)) {
+    if (state.queue.some(item => item.path === f.path)) {
+      duplicates++;
+    } else {
+      added++;
       state.queue.push({
         id: 'file_' + Math.random().toString(36).substring(2, 9),
         path: f.path,
@@ -202,6 +268,7 @@ function addFilesToQueue(files) {
     }
   });
   renderQueue();
+  return { added, duplicates };
 }
 
 // Le format cible par défaut découle du format réellement détecté.
@@ -266,22 +333,34 @@ function applyTargetFormat(fmt, categoryFilter, sourceFormats) {
 
 // Les presets ciblent le format réellement détecté, pas l'extension du fichier.
 const PRESETS = {
-  'png-webp': { target: 'webp', category: 'image', sources: ['png'] },
-  'jpg-png': { target: 'png', category: 'image', sources: ['jpeg', 'jfif'] },
-  'jfif-jpg': { target: 'jpg', category: 'image', sources: ['jfif'] },
-  'jxl-png': { target: 'png', category: 'image', sources: ['jxl'] },
-  'img-ico': { target: 'ico', category: 'image', sources: null },
-  'pdf-png': { target: 'png', category: 'document', sources: ['pdf'] },
-  'md-pdf': { target: 'pdf', category: 'document', sources: ['md'] },
-  'docx-pdf': { target: 'pdf', category: 'document', sources: ['docx'] }
+  'png-webp': { target: 'webp', category: 'image', sources: ['png'], label: 'PNG vers WebP', none: 'Aucun fichier PNG dans la liste.' },
+  'jpg-png': { target: 'png', category: 'image', sources: ['jpeg', 'jfif'], label: 'JPG vers PNG', none: 'Aucun fichier JPG dans la liste.' },
+  'jxl-png': { target: 'png', category: 'image', sources: ['jxl'], label: 'JXL vers PNG', none: 'Aucun fichier JXL dans la liste.' },
+  'img-ico': { target: 'ico', category: 'image', sources: null, label: 'Image vers ICO', none: 'Aucune image dans la liste.' },
+  'pdf-png': { target: 'png', category: 'document', sources: ['pdf'], label: 'PDF vers PNG', none: 'Aucun fichier PDF dans la liste.' },
+  'md-pdf': { target: 'pdf', category: 'document', sources: ['md'], label: 'Markdown vers PDF', none: 'Aucun fichier Markdown dans la liste.' },
+  'docx-pdf': { target: 'pdf', category: 'document', sources: ['docx'], label: 'DOCX vers PDF', none: 'Aucun fichier DOCX dans la liste.' }
 };
 
+const EMPTY_QUEUE = "La liste est vide : ajoutez d'abord des fichiers.";
+
 function applyPreset(presetKey) {
-  const preset = PRESETS[presetKey];
+  const preset = Object.prototype.hasOwnProperty.call(PRESETS, presetKey) ? PRESETS[presetKey] : null;
   if (!preset) return;
 
   globalFormatSelect.value = '';
-  applyTargetFormat(preset.target, preset.category, preset.sources);
+  if (!state.queue.length) { showNotice(EMPTY_QUEUE, 'error'); return; }
+  const applied = applyTargetFormat(preset.target, preset.category, preset.sources);
+  showNotice(applied ? `Appliqué à ${plural(applied, 'fichier')} : ${preset.label}.` : preset.none,
+    applied ? 'info' : 'error');
+}
+
+function applyGlobalFormat(fmt) {
+  if (!state.queue.length) { showNotice(EMPTY_QUEUE, 'error'); return; }
+  const applied = applyTargetFormat(fmt, null);
+  const label = String(fmt).toUpperCase();
+  showNotice(applied ? `Appliqué à ${plural(applied, 'fichier')} : sortie ${label}.`
+    : `Aucun fichier de la liste ne peut être converti en ${label}.`, applied ? 'info' : 'error');
 }
 
 function renderQueue() {
@@ -294,7 +373,7 @@ function renderQueue() {
   btnBrowseFolder.disabled = state.isConverting;
   document.querySelectorAll('.chip[data-preset]').forEach(chip => { chip.disabled = state.isConverting; });
   document.getElementById('queue-summary').textContent = state.isConverting
-    ? 'Conversion en cours…'
+    ? (state.progress ? `Conversion ${state.progress.current} sur ${state.progress.total}…` : 'Conversion en cours…')
     : readyCount ? `${readyCount} fichier${readyCount > 1 ? 's' : ''} à convertir.`
     : state.queue.length ? 'Aucun format pris en charge dans la liste.' : 'Ajoutez des fichiers pour commencer.';
 
@@ -322,13 +401,14 @@ function renderQueue() {
         <div class="file-details">
           <span class="file-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
           <span class="file-size">${formatBytes(item.size)} • ${escapeHtml(item.formatLabel)}${detectionNote(item)}</span>
+          ${item.status === 'error' && item.error ? `<span class="file-error">${escapeHtml(item.error)}</span>` : ''}
         </div>
       </div>
       <div class="file-actions">
         <select class="item-format-select" aria-label="Format de sortie pour ${escapeHtml(item.name)}" data-id="${escapeHtml(item.id)}" ${item.supported && !state.isConverting ? '' : 'disabled'}>
           ${optionsHtml}
         </select>
-        <span class="status-pill ${escapeHtml(item.status)}" title="${escapeHtml(item.error || '')}">${getStatusText(item.status)}</span>
+        <span class="status-pill ${escapeHtml(item.status)}">${getStatusText(item.status)}</span>
         <button class="btn-icon" data-remove-id="${escapeHtml(item.id)}" title="Retirer de la liste" aria-label="Retirer ${escapeHtml(item.name)} de la liste" ${state.isConverting ? 'disabled' : ''}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
@@ -348,6 +428,7 @@ function renderQueue() {
     btnRem.addEventListener('click', () => {
       if (state.isConverting) return;
       state.queue = state.queue.filter(q => q.id !== item.id);
+      showNotice(null);
       renderQueue();
     });
   });
@@ -376,17 +457,20 @@ function getTargetOptionsHtml(item, currentTarget) {
 function getStatusText(status) {
   switch (status) {
     case 'ready': return 'Prêt';
-    case 'processing': return 'En cours...';
-    case 'success': return 'Succès';
-    case 'error': return 'Erreur';
-    case 'unsupported': return 'Non supporté';
+    case 'processing': return 'En cours…';
+    case 'success': return 'Terminé';
+    case 'error': return 'Échec';
+    case 'unsupported': return 'Non pris en charge';
     default: return escapeHtml(status);
   }
 }
 
+const PLAY_ICON = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>';
+const SPINNER_ICON = '<svg class="spinner" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="10"/></svg>';
+
 async function startBatchConversion() {
   if (state.queue.length === 0) {
-    alert("Veuillez d'abord ajouter des fichiers à convertir.");
+    showNotice("Ajoutez d'abord des fichiers à convertir.", 'error');
     return;
   }
 
@@ -394,17 +478,17 @@ async function startBatchConversion() {
 
   const convertible = state.queue.filter(item => item.supported);
   if (convertible.length === 0) {
-    alert("Aucun fichier de la liste n'est dans un format pris en charge.");
+    showNotice("Aucun fichier de la liste n'est dans un format pris en charge.", 'error');
     return;
   }
 
   if (!window.pywebview || !window.pywebview.api) {
-    alert("La conversion est disponible dans l'application desktop. Ouvrez File Transformer depuis son lanceur.");
+    showNotice(BRIDGE_MISSING, 'error');
     return;
   }
   state.isConverting = true;
+  showNotice(null);
   btnConvertAll.disabled = true;
-  btnConvertAll.innerHTML = `<svg class="spinner" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" stroke-dasharray="32" stroke-dashoffset="10"/></svg> Conversion en cours...`;
 
   const options = {
     quality: parseInt(optQuality.value),
@@ -414,54 +498,63 @@ async function startBatchConversion() {
     dpi: parseInt(optDpi.value)
   };
 
+  let succeeded = 0;
   for (let i = 0; i < convertible.length; i++) {
     const item = convertible[i];
     item.status = 'processing';
+    item.error = null;
+    state.progress = { current: i + 1, total: convertible.length };
+    btnConvertAll.innerHTML = `${SPINNER_ICON} Conversion ${i + 1} sur ${convertible.length}…`;
     renderQueue();
 
+    let res = null;
     try {
-      if (window.pywebview && window.pywebview.api) {
-        const res = await window.pywebview.api.convert_single_file(
-          item.path,
-          item.targetFormat,
-          options,
-          state.outputFolder
-        );
-
-        if (res.success) {
-          item.status = 'success';
-          item.duration = res.duration;
-          item.error = null;
-          addHistoryItem({
-            name: item.name,
-            outputName: res.output_name,
-            outputPath: res.output_path,
-            duration: res.duration,
-            status: 'success'
-          });
-        } else {
-          item.status = 'error';
-          item.error = res.error;
-          addHistoryItem({
-            name: item.name,
-            outputName: '-',
-            outputPath: null,
-            duration: 0,
-            status: 'error',
-            error: res.error
-          });
-        }
-      }
+      res = await window.pywebview.api.convert_single_file(
+        item.path,
+        item.targetFormat,
+        options,
+        state.outputFolder
+      );
     } catch (err) {
+      // Le détail technique reste dans la console de débogage, jamais à l'écran.
+      console.error(err);
+      res = { success: false, error: UNEXPECTED_ERROR };
+    }
+
+    if (res && res.success) {
+      succeeded++;
+      item.status = 'success';
+      item.duration = res.duration;
+      addHistoryItem({
+        name: item.name,
+        outputName: res.output_name,
+        outputPath: res.output_path,
+        duration: res.duration,
+        status: 'success'
+      });
+    } else {
       item.status = 'error';
-      item.error = err.toString();
+      item.error = (res && typeof res.error === 'string' && res.error.trim()) ? res.error : UNEXPECTED_ERROR;
+      addHistoryItem({
+        name: item.name,
+        outputName: '-',
+        outputPath: null,
+        duration: 0,
+        status: 'error',
+        error: item.error
+      });
     }
     renderQueue();
   }
 
   state.isConverting = false;
+  state.progress = null;
+  const failed = convertible.length - succeeded;
+  showNotice(failed
+    ? `Terminé : ${plural(succeeded, 'fichier converti', 'fichiers convertis')}, ${plural(failed, 'échec')} (cause indiquée sous ${failed > 1 ? 'chaque' : 'le'} fichier).`
+    : `Terminé : ${plural(succeeded, 'fichier converti', 'fichiers convertis')}.`, failed ? 'error' : 'info');
   renderQueue();
-  btnConvertAll.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg> Lancer la conversion`;
+  btnConvertAll.innerHTML = `${PLAY_ICON} Lancer la conversion`;
 }
 
 function addHistoryItem(item) {

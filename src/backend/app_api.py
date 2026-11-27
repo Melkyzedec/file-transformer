@@ -73,24 +73,67 @@ class AppAPI:
         if not result:
             return []
 
-        return self.files_from_paths(list(result))
+        return self._analyze_paths(list(result))
+
+    # Raccourcis Windows : ce sont des fichiers ordinaires pour le système.
+    _SHORTCUT_EXTENSIONS = frozenset({'.lnk', '.url'})
+
+    @staticmethod
+    def _display_name(path_value) -> str:
+        """Dernier segment du chemin, par simple analyse de texte (aucun accès disque)."""
+        if not isinstance(path_value, str):
+            return ''
+        return path_value.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1].strip()
+
+    def _analyze_paths(self, paths):
+        """
+        Sépare les fichiers convertibles des éléments ignorés, pour que rien ne
+        disparaisse en silence : {'files': [...], 'ignored': [{'name', 'reason'}]}.
+        reason : folder, shortcut, reserved, missing ou invalid. Seul le nom est
+        renvoyé pour un élément ignoré, jamais son dossier.
+        """
+        files, ignored = [], []
+        for path in paths or []:
+            name = self._display_name(path)
+            if not isinstance(path, str) or not path.strip():
+                reason = 'invalid'
+            elif self._is_windows_reserved_path(path):
+                reason = 'reserved'
+            elif os.path.islink(path):
+                reason = 'shortcut'
+            elif os.path.isdir(path):
+                reason = 'folder'
+            elif not os.path.isfile(path):
+                reason = 'missing' if not os.path.exists(path) else 'invalid'
+            elif os.path.splitext(path)[1].lower() in self._SHORTCUT_EXTENSIONS:
+                reason = 'shortcut'
+            else:
+                files.append(self._file_info(path))
+                continue
+            ignored.append({'name': name, 'reason': reason})
+        return {'files': files, 'ignored': ignored}
+
+    def _dropped_files_payload(self, entries):
+        """Analyse les fichiers d'un dépôt natif (dataTransfer.files de pywebview)."""
+        paths, unnamed = [], []
+        for entry in entries or []:
+            entry = entry if isinstance(entry, dict) else {}
+            path = entry.get('pywebviewFullPath')
+            if isinstance(path, str) and path.strip():
+                paths.append(path)
+            else:
+                unnamed.append({'name': self._display_name(entry.get('name')), 'reason': 'invalid'})
+        payload = self._analyze_paths(paths)
+        payload['ignored'].extend(unnamed)
+        return payload
 
     def files_from_paths(self, paths):
         """
         Builds the file descriptors sent to the frontend, with automatic
         format detection based on file content (not just the extension).
-        Also used by the native drag & drop handler.
+        Les éléments ignorés sont décrits par _analyze_paths().
         """
-        file_info_list = []
-        for path in paths or []:
-            if not isinstance(path, str) or not path.strip():
-                continue
-            if self._is_windows_reserved_path(path):
-                continue
-            if os.path.islink(path) or not os.path.isfile(path):
-                continue
-            file_info_list.append(self._file_info(path))
-        return file_info_list
+        return self._analyze_paths(paths)['files']
 
     def detect_format(self, path):
         """Exposes content-based format detection to the frontend."""

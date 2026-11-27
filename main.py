@@ -9,6 +9,21 @@ import webview
 from webview.dom import DOMEventHandler
 from app_api import AppAPI
 
+def build_drop_script(api, event):
+    """
+    Le navigateur embarqué n'expose pas le chemin réel des fichiers déposés.
+    pywebview le fournit côté Python via 'pywebviewFullPath' : on analyse les
+    fichiers ici puis on renvoie au frontend les fichiers retenus et les
+    éléments ignorés (dossier, raccourci, nom réservé...), pour qu'aucun dépôt
+    ne disparaisse sans explication.
+    """
+    entries = ((event or {}).get('dataTransfer') or {}).get('files') or []
+    if not entries:
+        return None
+    payload = json.dumps(api._dropped_files_payload(entries))
+    return f'window.onNativeFilesDropped && window.onNativeFilesDropped({payload})'
+
+
 def main():
     api = AppAPI()
 
@@ -27,19 +42,9 @@ def main():
     api.set_window(window)
 
     def on_drop(event):
-        """
-        Le navigateur embarqué n'expose pas le chemin réel des fichiers déposés.
-        pywebview le fournit côté Python via 'pywebviewFullPath' : on analyse les
-        fichiers ici puis on renvoie le résultat au frontend.
-        """
-        files = (event.get('dataTransfer') or {}).get('files') or []
-        paths = [f.get('pywebviewFullPath') for f in files if f.get('pywebviewFullPath')]
-        if not paths:
-            return
-        payload = json.dumps(api.files_from_paths(paths))
-        window.evaluate_js(
-            f'window.onNativeFilesDropped && window.onNativeFilesDropped({payload})'
-        )
+        script = build_drop_script(api, event)
+        if script:
+            window.evaluate_js(script)
 
     def on_loaded():
         window.dom.body.on('drop', DOMEventHandler(on_drop, prevent_default=True))

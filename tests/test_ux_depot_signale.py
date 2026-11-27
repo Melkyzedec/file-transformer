@@ -41,7 +41,7 @@ class TestUxDepotSignale(_TempCase):
             self.assertNotIn(directory, text)
 
     def test_chaque_element_ignore_est_signale_avec_sa_raison(self):
-        payload = self.api.analyze_paths([
+        payload = self.api._analyze_paths([
             str(self.png), str(self.folder), str(self.shortcut),
             "C:\\CANARY_TEST\\NUL.txt", str(self.root / "CANARY_TEST_absent.png"), "", None,
         ])
@@ -61,7 +61,7 @@ class TestUxDepotSignale(_TempCase):
             raise AssertionError("Accès disque interdit pour un nom réservé Windows")
         with mock.patch("os.path.isfile", forbidden), mock.patch("os.path.isdir", forbidden), \
                 mock.patch("os.path.islink", forbidden), mock.patch("os.path.exists", forbidden):
-            payload = self.api.analyze_paths(["\\\\.\\PhysicalDrive0", "D:/CANARY_TEST/COM1"])
+            payload = self.api._analyze_paths(["\\\\.\\PhysicalDrive0", "D:/CANARY_TEST/COM1"])
         self.assertEqual([i["reason"] for i in payload["ignored"]], ["reserved", "reserved"])
 
     def test_lien_symbolique_signale_comme_raccourci(self):
@@ -70,7 +70,7 @@ class TestUxDepotSignale(_TempCase):
             os.symlink(self.png, link)
         except (OSError, NotImplementedError) as exc:
             self.skipTest(f"Liens symboliques indisponibles ici : {exc}")
-        payload = self.api.analyze_paths([str(link)])
+        payload = self.api._analyze_paths([str(link)])
         self.assertEqual(payload, {"files": [], "ignored": [{"name": "CANARY_TEST_lien.png", "reason": "shortcut"}]})
 
     def test_files_from_paths_reste_une_simple_liste(self):
@@ -102,6 +102,15 @@ class TestUxDepotSignale(_TempCase):
             {"name": "CANARY_TEST_inconnu", "reason": "invalid"},
         ])
         self.assertIsNone(main.build_drop_script(self.api, {"dataTransfer": {"files": []}}))
+
+
+    def test_aucune_nouvelle_methode_exposee_au_javascript(self):
+        # pywebview expose au JavaScript toute méthode publique d'AppAPI.
+        public = {name for name in dir(type(self.api)) if not name.startswith("_")}
+        self.assertEqual(public, {
+            "set_window", "select_files", "files_from_paths", "detect_format",
+            "select_output_folder", "convert_single_file", "open_folder", "get_supported_formats",
+        })
 
 
 if __name__ == "__main__":
